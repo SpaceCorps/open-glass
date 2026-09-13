@@ -2,8 +2,8 @@
  * @vitest-environment jsdom
  */
 import React from "react";
-import { beforeAll, describe, expect, it, vi } from "vite-plus/test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { GlassProvider } from "../src/context/GlassContext";
 import { GlassCard } from "../src/components/GlassCard";
 import { GlassWindow } from "../src/components/GlassWindow";
@@ -15,6 +15,13 @@ beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = vi
     .fn()
     .mockReturnValue(null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  if (typeof window !== "undefined" && !window.PointerEvent) {
+    window.PointerEvent = class PointerEvent extends MouseEvent {} as any;
+  }
+});
+
+afterEach(() => {
+  cleanup();
 });
 
 describe("Open Glass React Components", () => {
@@ -116,5 +123,197 @@ describe("Open Glass React Components", () => {
     expect(navbar).toBeDefined();
     expect(screen.getByText("Logo")).toBeDefined();
     expect(screen.getByText("Menu")).toBeDefined();
+  });
+
+  it("initializes GlassWindow variant visionos with default parallax enabled", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow variant="visionos" title="Vision Window" data-testid="vision-window">
+          <div>Vision content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("vision-window");
+    expect(windowEl).toBeDefined();
+    expect(windowEl.style.transform).toContain("perspective(1000px)");
+    expect(windowEl.style.transform).toContain("rotateX(0deg)");
+    expect(windowEl.style.transform).toContain("rotateY(0deg)");
+    expect(windowEl.style.transformStyle).toBe("preserve-3d");
+  });
+
+  it("updates CSS 3D transform on pointermove over GlassWindow", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow
+          variant="visionos"
+          title="Tilt Window"
+          data-testid="tilt-window"
+          maxTiltAngle={12}
+        >
+          <div>Tilt content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("tilt-window");
+    vi.spyOn(windowEl, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 200,
+      height: 200,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    // Move cursor to bottom-right quadrant: clientX = 150, clientY = 150
+    // nx = (150 - 0)/200 - 0.5 = 0.25
+    // ny = (150 - 0)/200 - 0.5 = 0.25
+    // rotateX = -ny * 12 = -3deg
+    // rotateY = nx * 12 = 3deg
+    fireEvent.pointerMove(windowEl, { clientX: 150, clientY: 150 });
+
+    expect(windowEl.style.transform).toContain("rotateX(-3deg)");
+    expect(windowEl.style.transform).toContain("rotateY(3deg)");
+  });
+
+  it("resets back towards neutral tilt on pointerleave", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow variant="visionos" data-testid="leave-window">
+          <div>Leave content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("leave-window");
+    vi.spyOn(windowEl, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 200,
+      height: 200,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    fireEvent.pointerMove(windowEl, { clientX: 180, clientY: 180 });
+    expect(windowEl.style.transform).not.toContain("rotateX(0deg)");
+
+    fireEvent.pointerLeave(windowEl);
+    expect(windowEl.style.transform).toContain("rotateX(0deg)");
+    expect(windowEl.style.transform).toContain("rotateY(0deg)");
+  });
+
+  it("updates specular highlight layer radial and linear gradient styles with pointer position", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow variant="visionos" data-testid="specular-window">
+          <div>Content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("specular-window");
+    const highlight = screen.getByTestId("specular-highlight");
+    expect(highlight).toBeDefined();
+
+    vi.spyOn(windowEl, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 200,
+      height: 200,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    // Move to (150, 150) -> nx = 0.25, ny = 0.25
+    // radial center at: 50 + 0.25 * 40 = 60%, 50 + 0.25 * 40 = 60%
+    // fresnelAngle = atan2(0.25, 0.25) * 180 / PI + 90 = 45 + 90 = 135deg
+    fireEvent.pointerMove(windowEl, { clientX: 150, clientY: 150 });
+
+    expect(highlight.style.background).toContain("radial-gradient(circle at 60% 60%");
+    expect(highlight.style.background).toContain("linear-gradient(135deg");
+  });
+
+  it("updates rotation angles on deviceorientation events", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow variant="visionos" data-testid="orientation-window" maxTiltAngle={12}>
+          <div>Orientation content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("orientation-window");
+
+    // beta = 50 (5 deg forward from 45), gamma = 8 (8 deg roll)
+    // tiltX = -(50 - 45) = -5deg
+    // tiltY = 8deg
+    const orientationEvent = new Event("deviceorientation") as any;
+    orientationEvent.beta = 50;
+    orientationEvent.gamma = 8;
+    act(() => {
+      window.dispatchEvent(orientationEvent);
+    });
+
+    expect(windowEl.style.transform).toContain("rotateX(-5deg)");
+    expect(windowEl.style.transform).toContain("rotateY(8deg)");
+  });
+
+  it("suppresses 3D tilt transforms when enableParallax is false", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow variant="visionos" enableParallax={false} data-testid="no-parallax-window">
+          <div>No parallax content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("no-parallax-window");
+    expect(windowEl.style.transform).toBe("");
+
+    fireEvent.pointerMove(windowEl, { clientX: 150, clientY: 150 });
+    expect(windowEl.style.transform).toBe("");
+  });
+
+  it("suppresses 3D rotation transforms when prefers-reduced-motion is reduce", () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    try {
+      render(
+        <GlassProvider>
+          <GlassWindow variant="visionos" data-testid="reduced-motion-window">
+            <div>Reduced motion content</div>
+          </GlassWindow>
+        </GlassProvider>,
+      );
+
+      const windowEl = screen.getByTestId("reduced-motion-window");
+      expect(windowEl.style.transform).toBe("");
+
+      fireEvent.pointerMove(windowEl, { clientX: 150, clientY: 150 });
+      expect(windowEl.style.transform).toBe("");
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
   });
 });
