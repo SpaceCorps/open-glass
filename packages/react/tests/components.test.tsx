@@ -4,7 +4,8 @@
 import React from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { GlassProvider } from "../src/context/GlassContext";
+import { GlassContext, GlassProvider } from "../src/context/GlassContext";
+
 import { GlassCard } from "../src/components/GlassCard";
 import { GlassWindow } from "../src/components/GlassWindow";
 import { GlassDock } from "../src/components/GlassDock";
@@ -315,5 +316,53 @@ describe("Open Glass React Components", () => {
     } finally {
       window.matchMedia = originalMatchMedia;
     }
+  });
+
+  it("renders GlassCard and GlassWindow with CSS backdrop-filter fallback when background capture is inactive", () => {
+    render(
+      <GlassProvider>
+        <GlassCard data-testid="fallback-card">Card Text</GlassCard>
+        <GlassWindow title="Fallback Window" data-testid="fallback-window">
+          Window Content
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const card = screen.getByTestId("fallback-card");
+    const windowEl = screen.getByTestId("fallback-window");
+
+    expect(card.style.backdropFilter).toContain("blur(20px)");
+    expect(card.style.background).toBe("rgba(255, 255, 255, 0.15)");
+
+    expect(windowEl.style.backdropFilter).toContain("blur(32px)");
+    expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.22)");
+  });
+
+  it("dials down CSS backdrop-filter when active GPU background capture is present", () => {
+    const mockContextValue = {
+      engine: null,
+      registerElement: vi.fn(),
+      updateElement: vi.fn(),
+      unregisterElement: vi.fn(),
+      hasBackgroundSource: true,
+    };
+
+    render(
+      <GlassContext.Provider value={mockContextValue}>
+        <GlassCard data-testid="gpu-card">Card Text</GlassCard>
+        <GlassWindow title="GPU Window" data-testid="gpu-window">
+          Window Content
+        </GlassWindow>
+      </GlassContext.Provider>,
+    );
+
+    const card = screen.getByTestId("gpu-card");
+    const windowEl = screen.getByTestId("gpu-window");
+
+    expect(card.style.backdropFilter).toBe("none");
+    expect(card.style.background).toBe("rgba(255, 255, 255, 0.03)");
+
+    expect(windowEl.style.backdropFilter).toBe("none");
+    expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.05)");
   });
 });

@@ -5,9 +5,21 @@ export interface ControlsPanelProps {
   optical: Required<OpticalParams>;
   onChange: (updated: Required<OpticalParams>) => void;
   onReset: () => void;
+  captureEnabled?: boolean;
+  onCaptureEnabledChange?: (enabled: boolean) => void;
+  captureFps?: number;
+  onCaptureFpsChange?: (fps: number) => void;
 }
 
-export const ControlsPanel: React.FC<ControlsPanelProps> = ({ optical, onChange, onReset }) => {
+export const ControlsPanel: React.FC<ControlsPanelProps> = ({
+  optical,
+  onChange,
+  onReset,
+  captureEnabled = true,
+  onCaptureEnabledChange,
+  captureFps = 30,
+  onCaptureFpsChange,
+}) => {
   const update = <K extends keyof OpticalParams>(key: K, value: OpticalParams[K]) => {
     onChange({
       ...optical,
@@ -60,6 +72,54 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({ optical, onChange,
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+        {/* DOM Capture Pipeline Controls */}
+        <div
+          style={{
+            padding: "0.75rem",
+            background: "rgba(255, 255, 255, 0.05)",
+            borderRadius: "10px",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: "8px",
+            }}
+          >
+            <span style={{ fontWeight: 600, color: "#fff" }}>DOM Refraction</span>
+            <label style={{ display: "flex", alignItems: "center", cursor: "pointer", gap: "6px" }}>
+              <input
+                type="checkbox"
+                checked={captureEnabled}
+                onChange={(e) => onCaptureEnabledChange?.(e.target.checked)}
+                style={{ cursor: "pointer" }}
+              />
+              <span style={{ fontSize: "0.75rem", color: captureEnabled ? "#4ade80" : "#94a3b8" }}>
+                {captureEnabled ? "Enabled" : "Disabled"}
+              </span>
+            </label>
+          </div>
+
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+              <span>Capture FPS</span>
+              <span style={{ fontFamily: "monospace" }}>{captureFps} fps</span>
+            </div>
+            <input
+              type="range"
+              min="15"
+              max="60"
+              step="5"
+              value={captureFps}
+              onChange={(e) => onCaptureFpsChange?.(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </div>
+        </div>
+
         {/* Blur Radius */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>

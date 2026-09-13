@@ -29,11 +29,21 @@ export interface GlassQuadDescriptor {
 
 export type GlassRendererBackend = "auto" | "webgpu" | "webgl2";
 
+export type BackgroundTextureSource =
+  | HTMLCanvasElement
+  | OffscreenCanvas
+  | ImageBitmap
+  | ImageData
+  | HTMLImageElement
+  | HTMLVideoElement;
+
 export interface GlassEngineConfig {
   backend?: GlassRendererBackend;
   width?: number;
   height?: number;
   pixelRatio?: number;
+  /** Enable automatic offscreen framebuffer allocation for background sampling. */
+  enableBackgroundCapture?: boolean;
 }
 
 export interface GlassEngine {
@@ -41,6 +51,10 @@ export interface GlassEngine {
   readonly canvas: HTMLCanvasElement;
   resize(width: number, height: number): void;
   updateQuads(quads: GlassQuadDescriptor[]): void;
+  /** Ingest an external image source or offscreen canvas as the background texture. */
+  updateBackgroundSource(source: BackgroundTextureSource): void;
+  /** Check if a valid background texture has been provided. */
+  hasBackgroundSource(): boolean;
   render(): void;
   destroy(): void;
 }

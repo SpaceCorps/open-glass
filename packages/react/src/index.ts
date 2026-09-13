@@ -7,3 +7,4 @@ export * from "./components/GlassWindow";
 export * from "./components/GlassDock";
 export * from "./components/GlassButton";
 export * from "./components/GlassNavbar";
+export * from "./components/GlassUnderlying";

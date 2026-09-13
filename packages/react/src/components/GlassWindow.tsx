@@ -1,6 +1,15 @@
-import React, { forwardRef, useEffect, useState, type HTMLAttributes, type ReactNode } from "react";
+import React, {
+  forwardRef,
+  useContext,
+  useEffect,
+  useState,
+  type HTMLAttributes,
+  type ReactNode,
+} from "react";
 import type { OpticalParams } from "@open-glass/core";
+import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+
 import { useParallaxTilt } from "../hooks/useParallaxTilt";
 
 export interface GlassWindowProps extends HTMLAttributes<HTMLDivElement> {
@@ -49,6 +58,9 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
       cornerRadius,
       optical,
     });
+
+    const context = useContext(GlassContext);
+    const hasBackgroundSource = context?.hasBackgroundSource ?? false;
 
     const isVisionOS = variant === "visionos";
     const shouldEnableParallax = enableParallax ?? isVisionOS;
@@ -137,10 +149,15 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
             variant === "visionos"
               ? "1.5px solid rgba(255, 255, 255, 0.45)"
               : "1px solid rgba(255, 255, 255, 0.3)",
-          background:
-            variant === "visionos" ? "rgba(255, 255, 255, 0.18)" : "rgba(240, 240, 245, 0.22)",
-          backdropFilter: "blur(32px) saturate(180%)",
-          WebkitBackdropFilter: "blur(32px) saturate(180%)",
+          background: hasBackgroundSource
+            ? variant === "visionos"
+              ? "rgba(255, 255, 255, 0.04)"
+              : "rgba(240, 240, 245, 0.05)"
+            : variant === "visionos"
+              ? "rgba(255, 255, 255, 0.18)"
+              : "rgba(240, 240, 245, 0.22)",
+          backdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
+          WebkitBackdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
           boxShadow:
             variant === "visionos"
               ? "0 30px 80px rgba(0, 0, 0, 0.35), 0 0 40px rgba(255, 255, 255, 0.15)"

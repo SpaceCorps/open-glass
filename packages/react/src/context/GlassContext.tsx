@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import {
   createGlassEngine,
+  DomCapturePipeline,
   type GlassEngine,
   type GlassEngineConfig,
   type GlassQuadDescriptor,
@@ -19,6 +20,12 @@ export interface GlassContextValue {
   registerElement: (descriptor: GlassQuadDescriptor) => void;
   updateElement: (id: string | number, descriptor: Partial<GlassQuadDescriptor>) => void;
   unregisterElement: (id: string | number) => void;
+  /** Whether the GPU engine has a valid background texture source active. */
+  hasBackgroundSource: boolean;
+  /** Register an underlying HTML element to be captured by the DOM pipeline. */
+  registerUnderlying?: (element: HTMLElement | null) => void;
+  /** The active DOM capture pipeline instance, if enabled. */
+  capturePipeline?: DomCapturePipeline | null;
 }
 
 export const GlassContext = createContext<GlassContextValue | null>(null);
@@ -36,6 +43,12 @@ export interface GlassProviderProps {
   config?: GlassEngineConfig;
   className?: string;
   style?: CSSProperties;
+  /** Optional ref pointing to an underlying HTML element to capture and refract. */
+  underlyingRef?: React.RefObject<HTMLElement | null>;
+  /** Enable real-time DOM capture of the underlying layer. Defaults to false. */
+  captureUnderlying?: boolean;
+  /** Target frame rate for the DOM capture pipeline. Defaults to 30. */
+  captureFps?: number;
 }
 
 export const GlassProvider: React.FC<GlassProviderProps> = ({
@@ -43,11 +56,17 @@ export const GlassProvider: React.FC<GlassProviderProps> = ({
   config,
   className,
   style,
+  underlyingRef,
+  captureUnderlying = false,
+  captureFps = 30,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [engine, setEngine] = useState<GlassEngine | null>(null);
   const elementsRef = useRef<Map<string | number, GlassQuadDescriptor>>(new Map());
   const rafRef = useRef<number | null>(null);
+  const registeredUnderlyingRef = useRef<HTMLElement | null>(null);
+  const [pipeline, setPipeline] = useState<DomCapturePipeline | null>(null);
+  const [hasBackgroundSource, setHasBackgroundSource] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -88,11 +107,68 @@ export const GlassProvider: React.FC<GlassProviderProps> = ({
     };
   }, [config]);
 
-  // GPU Synchronized Render Loop
+  // Manage DOM Capture Pipeline
+  useEffect(() => {
+    if (!captureUnderlying) {
+      if (pipeline) {
+        pipeline.destroy();
+        setPipeline(null);
+        setHasBackgroundSource(false);
+      }
+      return;
+    }
+
+    const targetEl = underlyingRef?.current ?? registeredUnderlyingRef.current;
+    const newPipeline = new DomCapturePipeline(targetEl, { fps: captureFps });
+    setPipeline(newPipeline);
+
+    return () => {
+      newPipeline.destroy();
+      setPipeline(null);
+      setHasBackgroundSource(false);
+    };
+  }, [captureUnderlying, captureFps, underlyingRef]);
+
+  // Keep pipeline target in sync if underlyingRef or registeredUnderlying changes
+  useEffect(() => {
+    if (!pipeline) return;
+    const targetEl = underlyingRef?.current ?? registeredUnderlyingRef.current;
+    if (targetEl && pipeline.targetElement !== targetEl) {
+      pipeline.attach(targetEl);
+    }
+  }, [pipeline, underlyingRef]);
+
+  // GPU Synchronized Render Loop with DOM Capture
   useEffect(() => {
     if (!engine) return;
 
+    let isCapturing = false;
+
     const renderLoop = () => {
+      if (
+        pipeline &&
+        captureUnderlying &&
+        pipeline.targetElement &&
+        !isCapturing &&
+        pipeline.isDirty
+      ) {
+        isCapturing = true;
+        pipeline
+          .capture()
+          .then((captured) => {
+            if (captured && engine) {
+              engine.updateBackgroundSource(captured);
+              setHasBackgroundSource(true);
+            }
+          })
+          .catch(() => {
+            // Silently handle capture error or cancellation
+          })
+          .finally(() => {
+            isCapturing = false;
+          });
+      }
+
       const quads = Array.from(elementsRef.current.values());
       engine.updateQuads(quads);
       engine.render();
@@ -107,7 +183,7 @@ export const GlassProvider: React.FC<GlassProviderProps> = ({
         rafRef.current = null;
       }
     };
-  }, [engine]);
+  }, [engine, pipeline, captureUnderlying]);
 
   const registerElement = (descriptor: GlassQuadDescriptor) => {
     elementsRef.current.set(descriptor.id, descriptor);
@@ -124,6 +200,20 @@ export const GlassProvider: React.FC<GlassProviderProps> = ({
     elementsRef.current.delete(id);
   };
 
+  const registerUnderlying = (element: HTMLElement | null) => {
+    registeredUnderlyingRef.current = element;
+    if (pipeline) {
+      if (element) {
+        pipeline.attach(element);
+      } else {
+        pipeline.detach();
+        setHasBackgroundSource(false);
+      }
+    }
+  };
+
+  const isBgActive = hasBackgroundSource || (engine?.hasBackgroundSource() ?? false);
+
   return (
     <GlassContext.Provider
       value={{
@@ -131,6 +221,9 @@ export const GlassProvider: React.FC<GlassProviderProps> = ({
         registerElement,
         updateElement,
         unregisterElement,
+        hasBackgroundSource: isBgActive,
+        registerUnderlying,
+        capturePipeline: pipeline,
       }}
     >
       <div
