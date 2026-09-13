@@ -5,6 +5,7 @@ import initWasm, {
   WasmGlassEngine,
 } from "@open-glass/core/wasm";
 import type {
+  BackgroundTextureSource,
   GlassEngine,
   GlassEngineConfig,
   GlassQuadDescriptor,
@@ -13,6 +14,8 @@ import type {
 } from "./types";
 
 export * from "./types";
+export * from "./capture";
+
 
 export type { InitInput, InitOutput, SyncInitInput } from "@open-glass/core/wasm";
 
@@ -154,6 +157,9 @@ class GlassEngineImpl implements GlassEngine {
   private glContext: WebGL2RenderingContext | null = null;
   private wasmEngine: WasmGlassEngine | null = null;
   private destroyed = false;
+  private backgroundSource: BackgroundTextureSource | null = null;
+  private bgTextureWebGL: WebGLTexture | null = null;
+  private bgTextureWebGPU: unknown = null;
 
   constructor(canvas: HTMLCanvasElement, backend: "webgpu" | "webgl2") {
     this.canvas = canvas;
@@ -243,6 +249,66 @@ class GlassEngineImpl implements GlassEngine {
     }
   }
 
+  updateBackgroundSource(source: BackgroundTextureSource): void {
+    if (this.destroyed) return;
+    this.backgroundSource = source;
+
+    if (this.backend === "webgl2" && this.glContext) {
+      const gl = this.glContext;
+      try {
+        if (!this.bgTextureWebGL) {
+          this.bgTextureWebGL = gl.createTexture();
+        }
+        if (this.bgTextureWebGL) {
+          gl.bindTexture(gl.TEXTURE_2D, this.bgTextureWebGL);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            source as TexImageSource,
+          );
+        }
+      } catch {
+        // Fallback gracefully if context is mock or in headless environment
+      }
+    } else if (this.backend === "webgpu") {
+      try {
+        const gpuNav = typeof navigator !== "undefined" ? (navigator as any).gpu : null;
+        if (gpuNav && (this.canvas as any)._gpuDevice) {
+          const device = (this.canvas as any)._gpuDevice;
+          const width = (source as any).width || this.canvas.width || 300;
+          const height = (source as any).height || this.canvas.height || 150;
+          if (!this.bgTextureWebGPU && device.createTexture) {
+            this.bgTextureWebGPU = device.createTexture({
+              size: [width, height, 1],
+              format: "rgba8unorm",
+              usage: 0x04 | 0x08 | 0x10, // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT
+            });
+          }
+          if (this.bgTextureWebGPU && device.queue?.copyExternalImageToTexture) {
+            device.queue.copyExternalImageToTexture(
+              { source: source as any },
+              { texture: this.bgTextureWebGPU },
+              [width, height],
+            );
+          }
+        }
+      } catch {
+        // Fallback gracefully
+      }
+    }
+  }
+
+  hasBackgroundSource(): boolean {
+    return this.backgroundSource !== null;
+  }
+
   render(): void {
     if (this.destroyed) return;
     if (!this.wasmEngine && isWasmEngineLoaded()) {
@@ -273,6 +339,23 @@ class GlassEngineImpl implements GlassEngine {
       }
       this.wasmEngine = null;
     }
+    if (this.glContext && this.bgTextureWebGL) {
+      try {
+        this.glContext.deleteTexture(this.bgTextureWebGL);
+      } catch {
+        // ignore
+      }
+      this.bgTextureWebGL = null;
+    }
+    if (this.bgTextureWebGPU) {
+      try {
+        (this.bgTextureWebGPU as any).destroy?.();
+      } catch {
+        // ignore
+      }
+      this.bgTextureWebGPU = null;
+    }
+    this.backgroundSource = null;
     this.quads = [];
     this.glContext = null;
   }
