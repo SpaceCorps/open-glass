@@ -62,7 +62,6 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
     const context = useContext(GlassContext);
     const hasBackgroundSource = context?.hasBackgroundSource ?? false;
 
-
     const isVisionOS = variant === "visionos";
     const shouldEnableParallax = enableParallax ?? isVisionOS;
     const shouldEnableFresnel = enableFresnel ?? isVisionOS;
@@ -160,7 +159,6 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
           backdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
           WebkitBackdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
           boxShadow:
-
             variant === "visionos"
               ? "0 30px 80px rgba(0, 0, 0, 0.35), 0 0 40px rgba(255, 255, 255, 0.15)"
               : "0 20px 50px rgba(0, 0, 0, 0.18), 0 1px 4px rgba(0, 0, 0, 0.08)",

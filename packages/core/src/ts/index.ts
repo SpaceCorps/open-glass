@@ -16,7 +16,6 @@ import type {
 export * from "./types";
 export * from "./capture";
 
-
 export type { InitInput, InitOutput, SyncInitInput } from "@open-glass/core/wasm";
 
 export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };

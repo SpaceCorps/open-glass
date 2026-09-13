@@ -19,9 +19,11 @@ export const App: React.FC = () => {
   const [optical, setOptical] = useState<Required<OpticalParams>>({
     ...DEFAULT_OPTICAL_PARAMS,
   });
+  const [captureEnabled, setCaptureEnabled] = useState(true);
+  const [captureFps, setCaptureFps] = useState(30);
 
   return (
-    <GlassProvider>
+    <GlassProvider captureUnderlying={captureEnabled} captureFps={captureFps}>
       <div
         style={{
           display: "flex",
@@ -196,6 +198,10 @@ export const App: React.FC = () => {
               optical={optical}
               onChange={setOptical}
               onReset={() => setOptical({ ...DEFAULT_OPTICAL_PARAMS })}
+              captureEnabled={captureEnabled}
+              onCaptureEnabledChange={setCaptureEnabled}
+              captureFps={captureFps}
+              onCaptureFpsChange={setCaptureFps}
             />
           </aside>
         </div>

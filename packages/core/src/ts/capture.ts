@@ -117,7 +117,10 @@ export class DomCapturePipeline {
   ): Promise<HTMLCanvasElement | OffscreenCanvas | ImageBitmap> {
     const rect = element.getBoundingClientRect?.() ?? { width: 300, height: 150 };
     const width = Math.max(1, Math.round((rect.width || element.clientWidth || 300) * this.scale));
-    const height = Math.max(1, Math.round((rect.height || element.clientHeight || 150) * this.scale));
+    const height = Math.max(
+      1,
+      Math.round((rect.height || element.clientHeight || 150) * this.scale),
+    );
 
     if (typeof XMLSerializer === "undefined") {
       // Non-browser or fallback environment

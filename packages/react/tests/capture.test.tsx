@@ -19,16 +19,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const Consumer: React.FC = () => {
-  const ctx = useGlassContext();
-  return (
-    <div data-testid="capture-status">
-      <span data-testid="has-pipeline">{String(Boolean(ctx.capturePipeline))}</span>
-      <span data-testid="has-bg">{String(ctx.hasBackgroundSource)}</span>
-    </div>
-  );
-};
-
 describe("React DOM Capture Pipeline Integration", () => {
   it("mounts capture pipeline when captureUnderlying is enabled", async () => {
     let capturedPipeline: core.DomCapturePipeline | null = null;
@@ -79,9 +69,7 @@ describe("React DOM Capture Pipeline Integration", () => {
           <button type="button" onClick={() => setText("Updated Text")}>
             Update
           </button>
-          <span data-testid="pipeline-dirty">
-            {String(Boolean(ctx.capturePipeline?.isDirty))}
-          </span>
+          <span data-testid="pipeline-dirty">{String(Boolean(ctx.capturePipeline?.isDirty))}</span>
         </div>
       );
     };

@@ -58,4 +58,3 @@ export interface GlassEngine {
   render(): void;
   destroy(): void;
 }
-

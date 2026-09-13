@@ -2,10 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, expect, it, vi } from "vite-plus/test";
-import {
-  createGlassEngine,
-  DomCapturePipeline,
-} from "../src/ts/index";
+import { createGlassEngine, DomCapturePipeline } from "../src/ts/index";
 
 describe("packages/core DomCapturePipeline and texture ingestion", () => {
   it("initializes pipeline, attaches observers, and marks dirty state on DOM mutations", async () => {

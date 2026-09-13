@@ -366,4 +366,3 @@ describe("Open Glass React Components", () => {
     expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.05)");
   });
 });
-

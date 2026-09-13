@@ -24,9 +24,6 @@ export const GlassUnderlying: React.FC<GlassUnderlyingProps> = ({
   ...rest
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const context = React.useContext(
-    React.createContext<import("../context/GlassContext").GlassContextValue | null>(null),
-  );
 
   let registerUnderlying: ((el: HTMLElement | null) => void) | undefined;
   try {
