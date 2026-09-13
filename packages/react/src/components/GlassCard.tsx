@@ -1,5 +1,6 @@
-import React, { forwardRef, type HTMLAttributes, type ReactNode } from "react";
+import React, { forwardRef, useContext, type HTMLAttributes, type ReactNode } from "react";
 import type { OpticalParams } from "@open-glass/core";
+import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 
 export interface GlassCardProps extends HTMLAttributes<HTMLDivElement> {
@@ -29,6 +30,9 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
       optical,
     });
 
+    const context = useContext(GlassContext);
+    const hasBackgroundSource = context?.hasBackgroundSource ?? false;
+
     const elevationStyles: Record<string, React.CSSProperties> = {
       flat: {
         boxShadow: "0 2px 10px rgba(0, 0, 0, 0.05)",
@@ -56,9 +60,11 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
           position: "relative",
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.28)",
-          background: "rgba(255, 255, 255, 0.15)",
-          backdropFilter: "blur(20px)",
-          WebkitBackdropFilter: "blur(20px)",
+          background: hasBackgroundSource
+            ? "rgba(255, 255, 255, 0.03)"
+            : "rgba(255, 255, 255, 0.15)",
+          backdropFilter: hasBackgroundSource ? "none" : "blur(20px)",
+          WebkitBackdropFilter: hasBackgroundSource ? "none" : "blur(20px)",
           overflow: "hidden",
           transition: interactive ? "transform 0.2s ease, box-shadow 0.2s ease" : undefined,
           ...elevationStyles[elevation],
