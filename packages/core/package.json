@@ -16,10 +16,15 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./wasm": {
+      "types": "./dist/wasm/open_glass_core.d.ts",
+      "import": "./dist/wasm/open_glass_core.js"
+    },
     "./shaders/*": "./src/shaders/*"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build:wasm": "bash ../../scripts/build-wasm.sh --release",
+    "build": "pnpm run build:wasm && tsc -p tsconfig.json",
     "test": "vp test run"
   },
   "devDependencies": {

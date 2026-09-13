@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - development
+  pull_request:
+    branches:
+      - main
+      - development
+
+jobs:
+  ci:
+    name: Build, Verify, and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Rust unit tests
+        run: cargo test --workspace
+
+      - name: Run Rust Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Build WebAssembly binaries
+        run: pnpm run build:wasm
+
+      - name: Verify WebAssembly build artifacts
+        run: |
+          test -s packages/core/dist/wasm/open_glass_core_bg.wasm || (echo "Wasm binary missing or empty" && exit 1)
+          test -s packages/core/dist/wasm/open_glass_core.d.ts || (echo "TypeScript declarations missing or empty" && exit 1)
+          grep -q "export class WasmGlassEngine" packages/core/dist/wasm/open_glass_core.d.ts || (echo "Missing WasmGlassEngine export" && exit 1)
+          echo "WebAssembly artifacts successfully verified."
+
+      - name: Build packages and apps
+        run: pnpm run build
+
+      - name: Run workspace tests
+        run: pnpm test
+
+      - name: Run linter and formatting checks
+        run: pnpm run check
