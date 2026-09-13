@@ -57,8 +57,6 @@ export const VisionOSDemo: React.FC<VisionOSDemoProps> = ({ optical }) => {
       {/* Floating Spatial Window with 3D Tilt */}
       <div
         style={{
-          transform: "rotateX(4deg) rotateY(-6deg)",
-          transition: "transform 0.4s ease",
           width: "100%",
           maxWidth: "680px",
           zIndex: 5,
@@ -69,6 +67,9 @@ export const VisionOSDemo: React.FC<VisionOSDemoProps> = ({ optical }) => {
           variant="visionos"
           optical={optical}
           cornerRadius={28}
+          enableParallax={true}
+          maxTiltAngle={14}
+          depth={18}
           style={{ width: "100%" }}
         >
           <div style={{ color: "#fff" }}>
