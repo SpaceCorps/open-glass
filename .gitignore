@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+pkg/
+target/
+.vite/
+*.tsbuildinfo
+
+# Logs & Environment
+*.log
+.env
+.env.local
+
+# Operating System
+.DS_Store
+Thumbs.db
