@@ -10,7 +10,8 @@
     "test": "pnpm -r --parallel test",
     "test:core": "cargo test --workspace",
     "clippy": "cargo clippy --workspace -- -D warnings",
-    "build": "pnpm run build:core && pnpm -r --filter=!@open-glass/core build",
+    "build:wasm": "pnpm --filter @open-glass/core build:wasm",
+    "build": "pnpm run build:wasm && pnpm run build:core && pnpm -r --filter=!@open-glass/core build",
     "build:core": "pnpm --filter @open-glass/core build",
     "dev": "pnpm --filter storybook dev"
   },

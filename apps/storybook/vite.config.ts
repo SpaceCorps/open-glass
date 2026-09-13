@@ -10,6 +10,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@open-glass/core/wasm": path.resolve(
+        __dirname,
+        "../../packages/core/dist/wasm/open_glass_core.js",
+      ),
       "@open-glass/core": path.resolve(__dirname, "../../packages/core/src/ts/index.ts"),
       "@open-glass/react": path.resolve(__dirname, "../../packages/react/src/index.ts"),
     },
