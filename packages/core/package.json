@@ -1,0 +1,29 @@
+{
+  "name": "@open-glass/core",
+  "version": "0.1.0",
+  "description": "Apple Glass optical engine for the web rendered on GPU with Rust and WebGPU/WebGL2",
+  "files": [
+    "dist",
+    "src",
+    "Cargo.toml"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./shaders/*": "./src/shaders/*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vp test run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  }
+}
