@@ -112,10 +112,19 @@ fn average_blur_radius(quads: &[GlassQuad]) -> f32 {
 }
 
 /// Quad rect in normalized UV space, as `u_glass_bounds` expects (`x, y, width, height`).
+///
+/// `quad.y` arrives as a top-down `getBoundingClientRect` pixel offset, while `u_glass_bounds` is
+/// consumed as bottom-up UV by `glass_composite.frag`, so the y origin is flipped here: a quad
+/// 50px from the top of a 400px canvas sits at `1.0 - (50 + height) / 400` in UV space.
 fn normalized_glass_bounds(quad: &GlassQuad, width: u32, height: u32) -> [f32; 4] {
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
-    [quad.x / w, quad.y / h, quad.width / w, quad.height / h]
+    [
+        quad.x / w,
+        (h - quad.y - quad.height) / h,
+        quad.width / w,
+        quad.height / h,
+    ]
 }
 
 /// Compile a single shader stage, surfacing the driver's info log on failure.
@@ -191,6 +200,17 @@ fn set_texture_sampling(gl: &Gl) {
     gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
     gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
     gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+}
+
+/// Bind the background texture ready for a DOM-source upload.
+///
+/// `UNPACK_FLIP_Y_WEBGL` defaults to false, which would land source row 0 — the *top* of the DOM
+/// backdrop — at texture `t = 0`, which the fullscreen stage's `v_uv = a_position * 0.5 + 0.5`
+/// samples at the *bottom* of the canvas. Flipping on upload keeps DOM-top at canvas-top.
+fn bind_background_for_upload(gl: &Gl, texture: &WebGlTexture) {
+    gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
+    gl.pixel_storei(Gl::UNPACK_FLIP_Y_WEBGL, 1);
+    set_texture_sampling(gl);
 }
 
 /// Allocate an empty RGBA texture plus the framebuffer that renders into it.
@@ -535,8 +555,7 @@ impl GlassRenderer for WebGl2Renderer {
 
     fn set_background_from_canvas(&mut self, canvas: &HtmlCanvasElement) -> Result<(), String> {
         let gl = &self.gl;
-        gl.bind_texture(Gl::TEXTURE_2D, Some(&self.background_texture));
-        set_texture_sampling(gl);
+        bind_background_for_upload(gl, &self.background_texture);
         gl.tex_image_2d_with_u32_and_u32_and_html_canvas_element(
             Gl::TEXTURE_2D,
             0,
@@ -553,8 +572,7 @@ impl GlassRenderer for WebGl2Renderer {
         canvas: &OffscreenCanvas,
     ) -> Result<(), String> {
         let gl = &self.gl;
-        gl.bind_texture(Gl::TEXTURE_2D, Some(&self.background_texture));
-        set_texture_sampling(gl);
+        bind_background_for_upload(gl, &self.background_texture);
         gl.tex_image_2d_with_u32_and_u32_and_offscreen_canvas(
             Gl::TEXTURE_2D,
             0,
@@ -689,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_glass_bounds() {
+    fn test_normalized_glass_bounds_flips_dom_y_to_uv_y() {
         let quad = GlassQuad {
             x: 100.0,
             y: 50.0,
@@ -697,8 +715,35 @@ mod tests {
             height: 200.0,
             ..GlassQuad::default()
         };
+        // 50px from the DOM top of a 400px canvas leaves 150px below it: (400 - 50 - 200) / 400.
         let bounds = normalized_glass_bounds(&quad, 800, 400);
-        assert_eq!(bounds, [0.125, 0.125, 0.5, 0.5]);
+        assert_eq!(bounds, [0.125, 0.375, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn test_normalized_glass_bounds_pins_flip_direction_for_asymmetric_rect() {
+        // Near the top of a tall canvas: the un-flipped math would give y = 0.05, the flipped
+        // math y = 0.85, so this case fails loudly if the flip is dropped or applied twice.
+        let quad = GlassQuad {
+            x: 40.0,
+            y: 50.0,
+            width: 100.0,
+            height: 100.0,
+            ..GlassQuad::default()
+        };
+        let bounds = normalized_glass_bounds(&quad, 200, 1000);
+        assert!(
+            (bounds[0] - 0.2).abs() < 1e-6,
+            "x is not flipped: {bounds:?}"
+        );
+        assert!(
+            (bounds[1] - 0.85).abs() < 1e-6,
+            "y flip is wrong: {bounds:?}"
+        );
+        assert!((bounds[2] - 0.5).abs() < 1e-6);
+        assert!((bounds[3] - 0.1).abs() < 1e-6);
+        // The top edge in UV space is the bottom edge in DOM space.
+        assert!(bounds[1] + bounds[3] > 0.5, "quad landed in the lower half");
     }
 
     #[test]
@@ -706,5 +751,7 @@ mod tests {
         let quad = GlassQuad::default();
         let bounds = normalized_glass_bounds(&quad, 0, 0);
         assert!(bounds.iter().all(|value| value.is_finite()));
+        // width/height clamp to 1, so the flip reduces to 1 - y - height on a unit canvas.
+        assert_eq!(bounds[1], 1.0 - quad.y - quad.height);
     }
 }
