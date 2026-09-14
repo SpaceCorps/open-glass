@@ -21,10 +21,18 @@ export type { InitInput, InitOutput, SyncInitInput } from "@open-glass/core/wasm
 export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };
 
 /**
- * Whether the renderer backend composites real pixels. False while the GPU pipeline is a stub;
- * flipped to true by the WebGL2 renderer work (plan 00592). Consumers key their CSS fallback off
- * `GlassEngine.isRenderReady()`, never off `hasBackgroundSource()` — an uploaded texture says
- * nothing about whether anything was drawn with it.
+ * Whether the renderer backend composites real pixels.
+ *
+ * The renderer itself is no longer missing: `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs`
+ * is a complete dual-Kawase blur plus rounded-rect composite pipeline that issues real draw calls.
+ * The flag stays `false` because nothing mounts that engine in a browser — `initWasmEngine()` is
+ * called from exactly one place in the repo, `packages/core/tests/wasm-export.test.ts`, so no
+ * renderer ever runs at runtime and every glass pixel on screen is still CSS. Flip this to `true`
+ * when the engine is initialized and rendering in the browser, not when a backend is written: the
+ * blocker is runtime wiring, not a missing renderer.
+ *
+ * Consumers key their CSS fallback off `GlassEngine.isRenderReady()`, never off
+ * `hasBackgroundSource()` — an uploaded texture says nothing about whether anything was drawn with it.
  */
 export const RENDERER_PRODUCES_PIXELS: boolean = false;
 
