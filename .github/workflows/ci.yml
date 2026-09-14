@@ -56,6 +56,10 @@ jobs:
           grep -q "export class WasmGlassEngine" packages/core/dist/wasm/open_glass_core.d.ts || (echo "Missing WasmGlassEngine export" && exit 1)
           echo "WebAssembly artifacts successfully verified."
 
+      # `cargo test` has no WebGL2 driver, so this is the only step that ever compiles the GLSL.
+      - name: Run headless WebGL2 shader tests
+        run: cd packages/core && wasm-pack test --headless --chrome
+
       - name: Build packages and apps
         run: pnpm run build
 

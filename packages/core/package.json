@@ -26,7 +26,8 @@
   "scripts": {
     "build:wasm": "bash ../../scripts/build-wasm.sh --release",
     "build": "pnpm run build:wasm && tsc -p tsconfig.json",
-    "test": "vp test run"
+    "test": "vp test run",
+    "test:browser": "wasm-pack test --headless --chrome"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
