@@ -13,6 +13,11 @@ export interface OpticalParams {
   lightAngle?: number;
   /** Surface micro-roughness / frosting grain intensity. */
   roughness?: number;
+  /**
+   * Chroma boost applied after the tint mix; 1.0 leaves the backdrop's saturation untouched, 1.8
+   * matches the CSS `saturate(180%)` fallback.
+   */
+  saturation?: number;
   /** Surface glass tint color (RGBA normalized 0.0 - 1.0). */
   tintColor?: [number, number, number, number];
 }
