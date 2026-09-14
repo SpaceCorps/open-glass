@@ -3,6 +3,46 @@ export interface DomCapturePipelineOptions {
   fps?: number;
   /** Scale factor for rasterization resolution. Defaults to 1. */
   scale?: number;
+  /** Notified every time a capture attempt throws, with the running failure count. */
+  onError?: (error: unknown, failureCount: number) => void;
+  /** Consecutive failures after which the pipeline stops attempting captures. Defaults to 5. */
+  maxFailures?: number;
+  /** Upper bound for the exponential retry backoff in milliseconds. Defaults to 5000. */
+  maxBackoffMs?: number;
+}
+
+export const XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+export const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+
+/**
+ * Ensure a serialized HTML root carries the XHTML namespace so it paints inside `foreignObject`.
+ *
+ * Everything inside `foreignObject` inherits the SVG namespace unless the subtree root declares its
+ * own, in which case the browser has no HTML box to lay out and rasterizes an empty image. The
+ * injection is idempotent: some engines already emit `xmlns` when serializing, and a duplicate
+ * attribute is an XML parse error, which would blank the raster just as reliably.
+ */
+export function ensureXhtmlNamespace(serialized: string): string {
+  // Attribute values are XML-escaped by XMLSerializer, so `>` cannot appear inside one.
+  const tagMatch = /<([a-zA-Z][^\s/>]*)([^>]*)>/.exec(serialized);
+  if (!tagMatch) {
+    return serialized;
+  }
+
+  const [openingTag, tagName, rawAttributes] = tagMatch;
+  if (/(^|\s)xmlns\s*=/.test(rawAttributes)) {
+    return serialized;
+  }
+
+  const isSelfClosing = rawAttributes.trimEnd().endsWith("/");
+  const attributes = isSelfClosing ? rawAttributes.replace(/\s*\/\s*$/, "") : rawAttributes;
+  const namespaced = `<${tagName}${attributes} xmlns="${XHTML_NAMESPACE}"${isSelfClosing ? " /" : ""}>`;
+
+  return (
+    serialized.slice(0, tagMatch.index) +
+    namespaced +
+    serialized.slice(tagMatch.index + openingTag.length)
+  );
 }
 
 /**
@@ -19,10 +59,19 @@ export class DomCapturePipeline {
   private resizeObserver: ResizeObserver | null = null;
   private cachedResult: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | null = null;
   private isCapturing = false;
+  private onError?: (error: unknown, failureCount: number) => void;
+  private maxFailures: number;
+  private maxBackoffMs: number;
+  private consecutiveFailures = 0;
+  private nextRetryTime = 0;
+  private lastError: unknown = null;
 
   constructor(element?: HTMLElement | null, options: DomCapturePipelineOptions = {}) {
     this.fps = Math.max(1, options.fps ?? 30);
     this.scale = options.scale ?? 1;
+    this.onError = options.onError;
+    this.maxFailures = Math.max(1, options.maxFailures ?? 5);
+    this.maxBackoffMs = Math.max(0, options.maxBackoffMs ?? 5000);
     if (element) {
       this.attach(element);
     }
@@ -50,6 +99,27 @@ export class DomCapturePipeline {
   }
 
   /**
+   * Number of consecutive failed capture attempts.
+   */
+  get failureCount(): number {
+    return this.consecutiveFailures;
+  }
+
+  /**
+   * The error thrown by the most recent failed capture attempt, if any.
+   */
+  get lastCaptureError(): unknown {
+    return this.lastError;
+  }
+
+  /**
+   * Whether the pipeline has given up after `maxFailures` consecutive failures.
+   */
+  get isFailing(): boolean {
+    return this.consecutiveFailures >= this.maxFailures;
+  }
+
+  /**
    * Set the target frame rate for capture throttling.
    */
   setFps(fps: number): void {
@@ -66,6 +136,7 @@ export class DomCapturePipeline {
     this.detach();
     this.target = element;
     this.dirty = true;
+    this.resetFailures();
 
     if (typeof MutationObserver !== "undefined") {
       this.mutationObserver = new MutationObserver(() => {
@@ -104,9 +175,31 @@ export class DomCapturePipeline {
 
   /**
    * Mark the capture pipeline dirty to force a re-capture on next frame.
+   *
+   * A genuine DOM change deserves a fresh attempt, so this also clears any accumulated
+   * failure backoff.
    */
   invalidate(): void {
     this.dirty = true;
+    this.resetFailures();
+  }
+
+  /**
+   * Reset the failure counter, retry backoff and recorded error.
+   */
+  private resetFailures(): void {
+    this.consecutiveFailures = 0;
+    this.nextRetryTime = 0;
+    this.lastError = null;
+  }
+
+  /**
+   * Build the SVG wrapper markup that rasterizes an HTML subtree via `foreignObject`.
+   */
+  buildSvgMarkup(element: HTMLElement, width: number, height: number): string {
+    const serializer = new XMLSerializer();
+    const serialized = ensureXhtmlNamespace(serializer.serializeToString(element));
+    return `<svg xmlns="${SVG_NAMESPACE}" width="${width}" height="${height}"><foreignObject width="100%" height="100%">${serialized}</foreignObject></svg>`;
   }
 
   /**
@@ -138,9 +231,7 @@ export class DomCapturePipeline {
       throw new Error("[open-glass] XMLSerializer is not available in this environment.");
     }
 
-    const serializer = new XMLSerializer();
-    const serialized = serializer.serializeToString(element);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%">${serialized}</foreignObject></svg>`;
+    const svg = this.buildSvgMarkup(element, width, height);
 
     return new Promise((resolve, reject) => {
       if (typeof Image === "undefined") {
@@ -266,7 +357,11 @@ export class DomCapturePipeline {
 
   /**
    * Capture the attached element if it is dirty and the frame interval has elapsed.
-   * Returns the updated canvas/image source, or the previously cached frame if clean or throttled.
+   * Returns the updated canvas/image source, or the previously cached frame if clean, throttled,
+   * backing off after a failure, or already given up.
+   *
+   * A failed attempt never rejects — callers get the last good frame (or `null`) back, so a
+   * render loop does not need a try/catch to stay alive.
    */
   async capture(): Promise<HTMLCanvasElement | OffscreenCanvas | ImageBitmap | null> {
     if (!this.target) {
@@ -274,6 +369,15 @@ export class DomCapturePipeline {
     }
 
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+
+    if (this.isFailing) {
+      return this.cachedResult;
+    }
+
+    if (now < this.nextRetryTime) {
+      return this.cachedResult;
+    }
+
     const elapsed = now - this.lastCaptureTime;
 
     if (!this.dirty && this.cachedResult) {
@@ -294,7 +398,19 @@ export class DomCapturePipeline {
       this.cachedResult = result;
       this.dirty = false;
       this.lastCaptureTime = now;
+      this.resetFailures();
       return result;
+    } catch (err) {
+      // Clearing `dirty` is what stops the loop from re-serializing the whole subtree every frame;
+      // the exponential backoff is what stops it from retrying a permanently broken capture.
+      this.dirty = false;
+      this.lastCaptureTime = now;
+      this.consecutiveFailures += 1;
+      this.lastError = err;
+      this.nextRetryTime =
+        now + Math.min(this.frameInterval * 2 ** this.consecutiveFailures, this.maxBackoffMs);
+      this.onError?.(err, this.consecutiveFailures);
+      return this.cachedResult;
     } finally {
       this.isCapturing = false;
     }
@@ -307,5 +423,6 @@ export class DomCapturePipeline {
     this.detach();
     this.dirty = false;
     this.cachedResult = null;
+    this.resetFailures();
   }
 }
