@@ -88,7 +88,10 @@ pub fn fresnel_schlick(cos_theta: f32, n1: f32, n2: f32) -> f32 {
 /// Chromatic aberration spectral offsets for RGB color channels along the refraction vector.
 ///
 /// Returns relative UV offsets `(red_offset, green_offset, blue_offset)`.
-pub fn chromatic_aberration_offsets(refraction_dir_uv: Vec2, dispersion: f32) -> (Vec2, Vec2, Vec2) {
+pub fn chromatic_aberration_offsets(
+    refraction_dir_uv: Vec2,
+    dispersion: f32,
+) -> (Vec2, Vec2, Vec2) {
     let base_displacement = refraction_dir_uv * dispersion;
     let red_offset = base_displacement * (1.0 + dispersion);
     let green_offset = base_displacement;
@@ -96,11 +99,27 @@ pub fn chromatic_aberration_offsets(refraction_dir_uv: Vec2, dispersion: f32) ->
     (red_offset, green_offset, blue_offset)
 }
 
+/// Dual Kawase downsample sampling step in texels for a given iteration.
+///
+/// Shared by [`dual_kawase_down_offsets`] and the GPU blur passes so the CPU reference kernels and
+/// the shader `u_offset` uniform always use the identical formula.
+pub fn dual_kawase_down_step(iteration: u32, blur_radius: f32) -> f32 {
+    (iteration as f32 + 1.0) * (blur_radius * 0.25).max(1.0)
+}
+
+/// Dual Kawase upsample sampling step in texels for a given iteration.
+///
+/// Shared by [`dual_kawase_up_offsets`] and the GPU blur passes so the CPU reference kernels and
+/// the shader `u_offset` uniform always use the identical formula.
+pub fn dual_kawase_up_step(iteration: u32, blur_radius: f32) -> f32 {
+    (iteration as f32 + 0.5) * (blur_radius * 0.25).max(1.0)
+}
+
 /// Dual Kawase downsample offset kernels for a given iteration step.
 ///
 /// Downsample pass uses 4 half-texel offset sample points around the center.
 pub fn dual_kawase_down_offsets(iteration: u32, texel_size: Vec2, blur_radius: f32) -> [Vec2; 4] {
-    let step = (iteration as f32 + 1.0) * (blur_radius * 0.25).max(1.0);
+    let step = dual_kawase_down_step(iteration, blur_radius);
     let half_offset = texel_size * step;
     [
         Vec2::new(-half_offset.x, -half_offset.y),
@@ -112,7 +131,7 @@ pub fn dual_kawase_down_offsets(iteration: u32, texel_size: Vec2, blur_radius: f
 
 /// Dual Kawase upsample offset kernels with 8-tap tent filter.
 pub fn dual_kawase_up_offsets(iteration: u32, texel_size: Vec2, blur_radius: f32) -> [Vec2; 8] {
-    let step = (iteration as f32 + 0.5) * (blur_radius * 0.25).max(1.0);
+    let step = dual_kawase_up_step(iteration, blur_radius);
     let offset = texel_size * step;
     let half_x = offset.x * 0.5;
     let half_y = offset.y * 0.5;
@@ -244,6 +263,38 @@ mod tests {
 
         let up_offsets = dual_kawase_up_offsets(0, texel_size, 16.0);
         assert_eq!(up_offsets.len(), 8);
+    }
+
+    #[test]
+    fn test_dual_kawase_steps_match_offset_kernels() {
+        let texel_size = Vec2::new(1.0 / 1920.0, 1.0 / 1080.0);
+        let blur_radius = 16.0;
+
+        for iteration in 0..5 {
+            // Down: the kernel's outermost tap is exactly texel_size * step.
+            let down_step = dual_kawase_down_step(iteration, blur_radius);
+            let down_offsets = dual_kawase_down_offsets(iteration, texel_size, blur_radius);
+            assert!((down_offsets[3].x - texel_size.x * down_step).abs() < 1e-9);
+            assert!((down_offsets[3].y - texel_size.y * down_step).abs() < 1e-9);
+
+            // Up: the tent filter's axial taps are exactly texel_size * step.
+            let up_step = dual_kawase_up_step(iteration, blur_radius);
+            let up_offsets = dual_kawase_up_offsets(iteration, texel_size, blur_radius);
+            assert!((up_offsets[4].x - texel_size.x * up_step).abs() < 1e-9);
+            assert!((up_offsets[2].y - texel_size.y * up_step).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_dual_kawase_steps_clamp_small_blur_radius() {
+        // (blur_radius * 0.25).max(1.0) floors the step scale at one texel.
+        assert!((dual_kawase_down_step(0, 0.0) - 1.0).abs() < 1e-6);
+        assert!((dual_kawase_down_step(1, 2.0) - 2.0).abs() < 1e-6);
+        assert!((dual_kawase_up_step(0, 0.0) - 0.5).abs() < 1e-6);
+
+        // Down steps grow monotonically with iteration; up steps trail them by half a step.
+        assert!(dual_kawase_down_step(1, 16.0) > dual_kawase_down_step(0, 16.0));
+        assert!(dual_kawase_up_step(3, 16.0) < dual_kawase_down_step(3, 16.0));
     }
 
     #[test]
