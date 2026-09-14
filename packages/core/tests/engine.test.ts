@@ -78,8 +78,11 @@ describe("packages/core engine negotiation", () => {
     engine.destroy();
   });
 
-  it("reports isRenderReady false while the renderer backend is a stub", async () => {
-    expect(RENDERER_PRODUCES_PIXELS).toBe(false);
+  it("reports isRenderReady false when the wasm renderer cannot be constructed", async () => {
+    // The flag is a static claim about the WebGL2 backend, not about this instance: with getContext
+    // mocked to null, WebGl2Renderer::new returns Err, `new WasmGlassEngine(...)` throws, and
+    // initWasm()'s catch leaves wasmEngine null — so readiness must still be false with the flag on.
+    expect(RENDERER_PRODUCES_PIXELS).toBe(true);
 
     const canvas = {
       width: 0,
@@ -99,5 +102,64 @@ describe("packages/core engine negotiation", () => {
     expect(engine.isRenderReady?.() ?? false).toBe(false);
 
     engine.destroy();
+  });
+
+  it("falls back to 300x150 when the canvas has not been laid out", async () => {
+    const canvas = {
+      width: 0,
+      height: 0,
+      clientWidth: 0,
+      clientHeight: 0,
+      getContext: vi.fn().mockReturnValue(null),
+    } as unknown as HTMLCanvasElement;
+
+    // `??` would have passed clientWidth 0 straight through and left the engine 0x0.
+    const engine = await createGlassEngine(canvas);
+
+    expect(canvas.width).toBe(300);
+    expect(canvas.height).toBe(150);
+
+    engine.destroy();
+  });
+
+  it("resolves with a usable engine when the wasm module cannot be loaded", async () => {
+    // A rejected wasm load must never escape createGlassEngine: consumers keep a working facade that
+    // degrades to CSS. Mocked and imported inside this test so the rest of the file keeps loading the
+    // real wasm binary.
+    vi.resetModules();
+    vi.doMock("@open-glass/core/wasm", () => ({
+      default: () => Promise.reject(new Error("simulated wasm fetch failure")),
+      init_panic_hook: () => {},
+      calculate_fresnel: () => 0,
+      RendererBackend: { Auto: 0, WebGpu: 1, WebGl2: 2 },
+      WasmGlassEngine: class {},
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const { createGlassEngine: create } = await import("../src/ts/index");
+      const canvas = {
+        width: 0,
+        height: 0,
+        clientWidth: 400,
+        clientHeight: 200,
+        getContext: vi.fn().mockReturnValue(null),
+      } as unknown as HTMLCanvasElement;
+
+      const engine = await create(canvas);
+
+      expect(engine.backend).toBe("webgl2");
+      expect(canvas.width).toBe(400);
+      expect(canvas.height).toBe(200);
+      expect(engine.isRenderReady?.() ?? false).toBe(false);
+      expect(() => engine.render()).not.toThrow();
+      expect(warn).toHaveBeenCalled();
+
+      engine.destroy();
+    } finally {
+      warn.mockRestore();
+      vi.doUnmock("@open-glass/core/wasm");
+      vi.resetModules();
+    }
   });
 });

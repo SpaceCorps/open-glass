@@ -23,18 +23,22 @@ export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };
 /**
  * Whether the renderer backend composites real pixels.
  *
- * The renderer itself is no longer missing: `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs`
- * is a complete dual-Kawase blur plus rounded-rect composite pipeline that issues real draw calls.
- * The flag stays `false` because nothing mounts that engine in a browser — `initWasmEngine()` is
- * called from exactly one place in the repo, `packages/core/tests/wasm-export.test.ts`, so no
- * renderer ever runs at runtime and every glass pixel on screen is still CSS. Flip this to `true`
- * when the engine is initialized and rendering in the browser, not when a backend is written: the
- * blocker is runtime wiring, not a missing renderer.
+ * `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs` is a complete dual-Kawase blur plus
+ * rounded-rect composite pipeline, and `createGlassEngine()` now awaits `initWasmEngine()` before it
+ * constructs the facade, so the renderer compiles its GLSL programs and issues draw calls at runtime
+ * in the browser. `packages/core/tests/webgl2_browser.rs` proves both programs compile and link on a
+ * real driver under `wasm-pack test --headless --chrome`.
+ *
+ * This flag is a static claim about the backend, not about any particular engine instance: it says
+ * the WebGL2 path draws pixels when it comes up. Per-instance readiness is `isRenderReady()`, which
+ * additionally requires a live `wasmEngine` (wasm loaded and the renderer constructed) and a
+ * `backgroundSource` — a headless context, a blocked wasm fetch or a missing backdrop all leave it
+ * `false` while this stays `true`.
  *
  * Consumers key their CSS fallback off `GlassEngine.isRenderReady()`, never off
  * `hasBackgroundSource()` — an uploaded texture says nothing about whether anything was drawn with it.
  */
-export const RENDERER_PRODUCES_PIXELS: boolean = false;
+export const RENDERER_PRODUCES_PIXELS: boolean = true;
 
 export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   ior: 1.52,
@@ -420,10 +424,28 @@ export async function createGlassEngine(
   config: GlassEngineConfig = {},
 ): Promise<GlassEngine> {
   const backend = await negotiateBackend(config.backend ?? "auto");
+
+  // Mount the wasm optical engine before constructing the facade: GlassEngineImpl's constructor only
+  // builds a WasmGlassEngine when isWasmEngineLoaded() is already true. Failure here is not fatal —
+  // no WebGL2, a blocked wasm fetch or a headless context must still yield a working engine that
+  // degrades to the CSS fallback, so this never rethrows.
+  try {
+    await initWasmEngine();
+  } catch (error) {
+    console.warn(
+      "[open-glass] wasm optical engine failed to initialize; using CSS fallback:",
+      error,
+    );
+  }
+
   const engine = new GlassEngineImpl(canvas, backend);
 
-  const initialWidth = config.width ?? canvas.clientWidth ?? 300;
-  const initialHeight = config.height ?? canvas.clientHeight ?? 150;
+  // An explicit zero check, not `??`: an unlaid-out canvas reports clientWidth 0, which is a
+  // perfectly defined number, so `??` would never fire and the engine would start 0x0.
+  const measuredWidth = canvas.clientWidth > 0 ? canvas.clientWidth : 300;
+  const measuredHeight = canvas.clientHeight > 0 ? canvas.clientHeight : 150;
+  const initialWidth = config.width && config.width > 0 ? config.width : measuredWidth;
+  const initialHeight = config.height && config.height > 0 ? config.height : measuredHeight;
   engine.resize(initialWidth, initialHeight);
 
   return engine;
