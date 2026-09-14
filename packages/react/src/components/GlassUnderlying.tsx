@@ -6,6 +6,7 @@ import React, {
   type ReactNode,
 } from "react";
 import { useGlassContext } from "../context/GlassContext";
+import { GLASS_Z_UNDERLYING } from "../layers";
 
 export interface GlassUnderlyingProps extends HTMLAttributes<HTMLDivElement> {
   children?: ReactNode;
@@ -50,7 +51,7 @@ export const GlassUnderlying: React.FC<GlassUnderlyingProps> = ({
       className={`open-glass-underlying ${className ?? ""}`}
       style={{
         position: "relative",
-        zIndex: 0,
+        zIndex: GLASS_Z_UNDERLYING,
         ...style,
       }}
       {...rest}

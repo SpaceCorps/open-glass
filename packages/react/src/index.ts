@@ -1,4 +1,5 @@
 export * from "./context/GlassContext";
+export * from "./layers";
 export * from "./hooks/useGlassElement";
 export * from "./hooks/useParallaxTilt";
 export * from "./components/GlassCanvas";
