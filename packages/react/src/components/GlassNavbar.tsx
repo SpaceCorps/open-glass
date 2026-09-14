@@ -1,5 +1,6 @@
-import React, { forwardRef, type HTMLAttributes, type ReactNode } from "react";
+import React, { forwardRef, useContext, type HTMLAttributes, type ReactNode } from "react";
 import type { OpticalParams } from "@open-glass/core";
+import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 
 export interface GlassNavbarProps extends HTMLAttributes<HTMLElement> {
@@ -14,6 +15,12 @@ export const GlassNavbar = forwardRef<HTMLElement, GlassNavbarProps>(
       cornerRadius: 0,
       optical,
     });
+
+    // Same GPU handover as GlassCard / GlassWindow: the navbar registers a quad, so once the renderer
+    // composites, keeping the CSS blur on would stack two different glass models in one scene.
+    const context = useContext(GlassContext);
+    const isRenderReady = context?.isRenderReady ?? false;
+    const cssBackdrop = "blur(24px) saturate(180%)";
 
     return (
       <header
@@ -37,9 +44,9 @@ export const GlassNavbar = forwardRef<HTMLElement, GlassNavbarProps>(
           justifyContent: "space-between",
           padding: "0.875rem 2rem",
           borderBottom: "1px solid rgba(255, 255, 255, 0.25)",
-          background: "rgba(255, 255, 255, 0.14)",
-          backdropFilter: "blur(24px) saturate(180%)",
-          WebkitBackdropFilter: "blur(24px) saturate(180%)",
+          background: isRenderReady ? "rgba(255, 255, 255, 0.03)" : "rgba(255, 255, 255, 0.14)",
+          backdropFilter: isRenderReady ? "none" : cssBackdrop,
+          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
           boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
           ...style,
         }}

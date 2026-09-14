@@ -1,11 +1,13 @@
 import React, {
   forwardRef,
+  useContext,
   useState,
   type ButtonHTMLAttributes,
   type PointerEvent,
   type ReactNode,
 } from "react";
 import type { OpticalParams } from "@open-glass/core";
+import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 
 export interface GlassButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -39,6 +41,12 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
 
     const [coords, setCoords] = useState<{ x: number; y: number } | null>(null);
     const [isPressed, setIsPressed] = useState(false);
+
+    // Same GPU handover as GlassCard / GlassWindow: the button registers a quad, so once the renderer
+    // composites, keeping the CSS blur on would stack two different glass models in one scene.
+    const context = useContext(GlassContext);
+    const isRenderReady = context?.isRenderReady ?? false;
+    const cssBackdrop = "blur(16px)";
 
     const handlePointerMove = (e: PointerEvent<HTMLButtonElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -83,10 +91,15 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
           padding: "0.625rem 1.25rem",
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.35)",
-          background:
-            variant === "primary" ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.12)",
-          backdropFilter: "blur(16px)",
-          WebkitBackdropFilter: "blur(16px)",
+          background: isRenderReady
+            ? variant === "primary"
+              ? "rgba(255, 255, 255, 0.08)"
+              : "rgba(255, 255, 255, 0.04)"
+            : variant === "primary"
+              ? "rgba(255, 255, 255, 0.22)"
+              : "rgba(255, 255, 255, 0.12)",
+          backdropFilter: isRenderReady ? "none" : cssBackdrop,
+          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
           boxShadow: isPressed
             ? "0 2px 6px rgba(0, 0, 0, 0.15)"
             : "0 6px 20px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.08)",

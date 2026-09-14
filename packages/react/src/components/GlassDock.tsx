@@ -1,5 +1,12 @@
-import React, { forwardRef, useState, type HTMLAttributes, type ReactNode } from "react";
+import React, {
+  forwardRef,
+  useContext,
+  useState,
+  type HTMLAttributes,
+  type ReactNode,
+} from "react";
 import type { OpticalParams } from "@open-glass/core";
+import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 
 export interface GlassDockItem {
@@ -26,6 +33,14 @@ export const GlassDock = forwardRef<HTMLDivElement, GlassDockProps>(
 
     const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
+    // The dock publishes a quad through useGlassElement, so once the renderer composites it is being
+    // painted by the canvas. Keeping the CSS literal on unconditionally stacked a CSS blur underneath
+    // the GPU glass and left one scene mixing two different optical models. Same handover as
+    // GlassCard / GlassWindow, keyed off renderer readiness rather than `hasBackgroundSource`.
+    const context = useContext(GlassContext);
+    const isRenderReady = context?.isRenderReady ?? false;
+    const cssBackdrop = "blur(28px) saturate(190%)";
+
     return (
       <div
         ref={(node) => {
@@ -45,9 +60,9 @@ export const GlassDock = forwardRef<HTMLDivElement, GlassDockProps>(
           padding: "10px 16px",
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.35)",
-          background: "rgba(255, 255, 255, 0.16)",
-          backdropFilter: "blur(28px) saturate(190%)",
-          WebkitBackdropFilter: "blur(28px) saturate(190%)",
+          background: isRenderReady ? "rgba(255, 255, 255, 0.04)" : "rgba(255, 255, 255, 0.16)",
+          backdropFilter: isRenderReady ? "none" : cssBackdrop,
+          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
           boxShadow: "0 20px 50px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.1)",
           ...style,
         }}
