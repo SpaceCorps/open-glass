@@ -20,6 +20,14 @@ export type { InitInput, InitOutput, SyncInitInput } from "@open-glass/core/wasm
 
 export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };
 
+/**
+ * Whether the renderer backend composites real pixels. False while the GPU pipeline is a stub;
+ * flipped to true by the WebGL2 renderer work (plan 00592). Consumers key their CSS fallback off
+ * `GlassEngine.isRenderReady()`, never off `hasBackgroundSource()` — an uploaded texture says
+ * nothing about whether anything was drawn with it.
+ */
+export const RENDERER_PRODUCES_PIXELS: boolean = false;
+
 export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   ior: 1.52,
   blurRadius: 16,
@@ -306,6 +314,15 @@ class GlassEngineImpl implements GlassEngine {
 
   hasBackgroundSource(): boolean {
     return this.backgroundSource !== null;
+  }
+
+  isRenderReady(): boolean {
+    return (
+      RENDERER_PRODUCES_PIXELS &&
+      !this.destroyed &&
+      this.backgroundSource !== null &&
+      this.wasmEngine !== null
+    );
   }
 
   render(): void {

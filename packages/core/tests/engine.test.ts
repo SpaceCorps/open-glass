@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { createGlassEngine, negotiateBackend, probeWebGpuSupport } from "../src/ts/index";
+import {
+  createGlassEngine,
+  negotiateBackend,
+  probeWebGpuSupport,
+  RENDERER_PRODUCES_PIXELS,
+} from "../src/ts/index";
 
 describe("packages/core engine negotiation", () => {
   it("falls back to webgl2 when navigator.gpu is absent", async () => {
@@ -69,6 +74,29 @@ describe("packages/core engine negotiation", () => {
     engine.resize(800, 600);
     expect(canvas.width).toBe(800);
     expect(canvas.height).toBe(600);
+
+    engine.destroy();
+  });
+
+  it("reports isRenderReady false while the renderer backend is a stub", async () => {
+    expect(RENDERER_PRODUCES_PIXELS).toBe(false);
+
+    const canvas = {
+      width: 0,
+      height: 0,
+      clientWidth: 400,
+      clientHeight: 200,
+      getContext: vi.fn().mockReturnValue(null),
+    } as unknown as HTMLCanvasElement;
+
+    const engine = await createGlassEngine(canvas, { width: 400, height: 200 });
+
+    expect(engine.isRenderReady?.() ?? false).toBe(false);
+
+    // An uploaded background texture is not evidence that anything was drawn with it.
+    engine.updateBackgroundSource({ width: 4, height: 4 } as unknown as HTMLCanvasElement);
+    expect(engine.hasBackgroundSource()).toBe(true);
+    expect(engine.isRenderReady?.() ?? false).toBe(false);
 
     engine.destroy();
   });
