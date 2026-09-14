@@ -188,7 +188,7 @@ class GlassEngineImpl implements GlassEngine {
           this.backend === "webgpu" ? RendererBackend.WebGpu : RendererBackend.WebGl2;
         const width = this.canvas.width || 300;
         const height = this.canvas.height || 150;
-        this.wasmEngine = new WasmGlassEngine(backendEnum, width, height);
+        this.wasmEngine = new WasmGlassEngine(this.canvas, backendEnum, width, height);
       } catch {
         // Fall back gracefully to pure JS/WebGL2 if WasmGlassEngine construction fails
         this.wasmEngine = null;
@@ -248,9 +248,36 @@ class GlassEngineImpl implements GlassEngine {
     }
   }
 
+  /**
+   * Hand a canvas-backed backdrop to the Rust renderer, which owns the WebGL2 background texture.
+   * Returns false when Rust cannot accept this source, so the caller falls back to the JS upload.
+   */
+  private uploadBackgroundViaWasm(source: BackgroundTextureSource): boolean {
+    if (!this.wasmEngine) return false;
+    try {
+      if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) {
+        this.wasmEngine.set_background_from_canvas(source);
+        return true;
+      }
+      if (typeof OffscreenCanvas !== "undefined" && source instanceof OffscreenCanvas) {
+        this.wasmEngine.set_background_from_offscreen_canvas(source);
+        return true;
+      }
+    } catch {
+      // Fall through to the JS texImage2D path if the Rust upload rejects the source
+    }
+    return false;
+  }
+
   updateBackgroundSource(source: BackgroundTextureSource): void {
     if (this.destroyed) return;
     this.backgroundSource = source;
+
+    // ImageBitmap / ImageData / HTMLImageElement / HTMLVideoElement are not accepted by the Rust
+    // entry points, so those keep using the JS upload below.
+    if (this.backend === "webgl2" && this.uploadBackgroundViaWasm(source)) {
+      return;
+    }
 
     if (this.backend === "webgl2" && this.glContext) {
       const gl = this.glContext;

@@ -6,6 +6,7 @@ use renderer::{
     webgl2::WebGl2Renderer, webgpu::WebGpuRenderer, GlassQuad, GlassRenderer, RendererBackend,
 };
 use wasm_bindgen::prelude::*;
+use web_sys::{HtmlCanvasElement, OffscreenCanvas};
 
 #[wasm_bindgen]
 pub fn init_panic_hook() {
@@ -21,20 +22,25 @@ pub struct WasmGlassEngine {
 #[wasm_bindgen]
 impl WasmGlassEngine {
     #[wasm_bindgen(constructor)]
-    pub fn new(backend: RendererBackend, width: u32, height: u32) -> Result<WasmGlassEngine, JsValue> {
+    pub fn new(
+        canvas: HtmlCanvasElement,
+        backend: RendererBackend,
+        width: u32,
+        height: u32,
+    ) -> Result<WasmGlassEngine, JsValue> {
         let renderer: Box<dyn GlassRenderer> = match backend {
             RendererBackend::Auto | RendererBackend::WebGpu => {
                 // In auto mode, try WebGpu first, then fallback to WebGl2
                 match WebGpuRenderer::new(width, height) {
                     Ok(r) => Box::new(r),
                     Err(_) => Box::new(
-                        WebGl2Renderer::new(width, height)
+                        WebGl2Renderer::new(&canvas, width, height)
                             .map_err(|e| JsValue::from_str(&e))?,
                     ),
                 }
             }
             RendererBackend::WebGl2 => Box::new(
-                WebGl2Renderer::new(width, height).map_err(|e| JsValue::from_str(&e))?,
+                WebGl2Renderer::new(&canvas, width, height).map_err(|e| JsValue::from_str(&e))?,
             ),
         };
 
@@ -42,6 +48,25 @@ impl WasmGlassEngine {
             renderer,
             quads: Vec::new(),
         })
+    }
+
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
+    #[wasm_bindgen]
+    pub fn set_background_from_canvas(&mut self, canvas: HtmlCanvasElement) -> Result<(), JsValue> {
+        self.renderer
+            .set_background_from_canvas(&canvas)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` into the background texture.
+    #[wasm_bindgen]
+    pub fn set_background_from_offscreen_canvas(
+        &mut self,
+        canvas: OffscreenCanvas,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .set_background_from_offscreen_canvas(&canvas)
+            .map_err(|e| JsValue::from_str(&e))
     }
 
     #[wasm_bindgen]
