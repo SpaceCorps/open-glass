@@ -89,4 +89,9 @@ section honest: describe what the code does now, and put anything unbuilt under 
 
 ## License
 
-MIT OR Apache-2.0
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([./LICENSE-APACHE](./LICENSE-APACHE))
+- MIT License ([./LICENSE-MIT](./LICENSE-MIT))
+
+at your option.
