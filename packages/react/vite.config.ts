@@ -7,10 +7,7 @@ import path from "path";
 export default defineConfig({
   resolve: {
     alias: {
-      "@open-glass/core/wasm": path.resolve(
-        __dirname,
-        "../core/dist/wasm/open_glass_core.js",
-      ),
+      "@open-glass/core/wasm": path.resolve(__dirname, "../core/dist/wasm/open_glass_core.js"),
       "@open-glass/core": path.resolve(__dirname, "../core/src/ts/index.ts"),
     },
   },
