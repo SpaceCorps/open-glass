@@ -14,6 +14,7 @@ uniform float u_rim_power;
 uniform float u_sheen_intensity;
 uniform float u_light_angle;
 uniform float u_roughness;
+uniform float u_saturation;
 uniform vec4 u_tint_color;
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
@@ -72,7 +73,14 @@ void main() {
     float border_light = bevel_border * max(dot(normal_2d, light_dir.xy), 0.0) * 0.8;
 
     vec3 tinted = mix(refracted_color, u_tint_color.rgb, u_tint_color.a);
-    vec3 final_rgb = tinted + vec3(fresnel) + vec3(specular + border_light);
+    // CSS `saturate(N%)` is a luma-preserving chroma scale, and the fallback literals all use 180-190%.
+    // Without this the composite is strictly less saturated than the CSS it replaces: the tint mix above
+    // pulls 12% white *in*, and the blur below averages chroma out.
+    float luma = dot(tinted, vec3(0.2126, 0.7152, 0.0722));
+    // The clamp matters: `mix` with a factor above 1.0 extrapolates and can drive a channel out of
+    // [0, 1] before the additive sheen ever lands on it.
+    vec3 saturated = clamp(mix(vec3(luma), tinted, u_saturation), 0.0, 1.0);
+    vec3 final_rgb = saturated + vec3(fresnel) + vec3(specular + border_light);
 
     fragColor = vec4(final_rgb, alpha);
 }
