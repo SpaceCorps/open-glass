@@ -30,23 +30,30 @@ export function useGlassElement<T extends HTMLElement = HTMLDivElement>(
     const updateGeometry = () => {
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const parentRect = el.offsetParent?.getBoundingClientRect() ?? {
+      // Quads live in the glass canvas's coordinate space, which is the provider's container — not
+      // whatever positioned ancestor the element happens to sit inside. `offsetParent` is only a
+      // fallback for a hook used outside a provider-rendered tree.
+      const origin = context.containerRef?.current ?? el.offsetParent;
+      const originRect = origin?.getBoundingClientRect() ?? {
         left: 0,
         top: 0,
       };
 
-      const x = rect.left - parentRect.left;
-      const y = rect.top - parentRect.top;
+      const x = rect.left - originRect.left;
+      const y = rect.top - originRect.top;
 
-      context.registerElement({
-        id,
-        x,
-        y,
-        width: rect.width,
-        height: rect.height,
-        cornerRadius,
-        optical,
-      });
+      context.registerElement(
+        {
+          id,
+          x,
+          y,
+          width: rect.width,
+          height: rect.height,
+          cornerRadius,
+          optical,
+        },
+        el,
+      );
     };
 
     updateGeometry();
