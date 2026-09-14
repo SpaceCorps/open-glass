@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   createGlassEngine,
+  DEFAULT_OPTICAL_PARAMS,
   negotiateBackend,
   probeWebGpuSupport,
   RENDERER_PRODUCES_PIXELS,
@@ -68,6 +69,7 @@ describe("packages/core engine negotiation", () => {
     vi.resetModules();
 
     const uploads: unknown[] = [];
+    const quadArgs: number[][] = [];
     class FakeWasmEngine {
       constructor(..._args: unknown[]) {}
       set_background_from_canvas(source: unknown) {
@@ -80,8 +82,12 @@ describe("packages/core engine negotiation", () => {
         return uploads.length > 0;
       }
       resize() {}
-      clear_quads() {}
-      add_quad() {}
+      clear_quads() {
+        quadArgs.length = 0;
+      }
+      add_quad(...args: number[]) {
+        quadArgs.push(args);
+      }
       render() {}
       free() {}
     }
@@ -125,6 +131,39 @@ describe("packages/core engine negotiation", () => {
       expect(engine.hasBackgroundSource()).toBe(true);
       // A confirmed upload into a live renderer is the whole readiness condition.
       expect(engine.isRenderReady?.() ?? false).toBe(true);
+
+      // `add_quad` is positional and must mirror `OpticalParams`' Rust field order, with `saturation`
+      // between `roughness` and the four tint channels. A swap would feed the chroma boost into a tint
+      // channel and `updateQuads` swallows every throw from this call, so nothing else here would
+      // notice; the browser test's chroma differential is the other half of this guard.
+      engine.updateQuads([
+        {
+          id: "panel",
+          x: 8,
+          y: 16,
+          width: 100,
+          height: 50,
+          cornerRadius: 12,
+          optical: { saturation: 1.42 },
+        },
+      ]);
+      expect(quadArgs).toHaveLength(1);
+      expect(quadArgs[0]).toEqual([
+        8,
+        16,
+        100,
+        50,
+        12,
+        DEFAULT_OPTICAL_PARAMS.ior,
+        DEFAULT_OPTICAL_PARAMS.blurRadius,
+        DEFAULT_OPTICAL_PARAMS.dispersion,
+        DEFAULT_OPTICAL_PARAMS.rimPower,
+        DEFAULT_OPTICAL_PARAMS.sheenIntensity,
+        DEFAULT_OPTICAL_PARAMS.lightAngle,
+        DEFAULT_OPTICAL_PARAMS.roughness,
+        1.42,
+        ...DEFAULT_OPTICAL_PARAMS.tintColor,
+      ]);
 
       engine.destroy();
     } finally {

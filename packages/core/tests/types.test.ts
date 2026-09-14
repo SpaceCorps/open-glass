@@ -10,6 +10,9 @@ describe("packages/core types and defaults", () => {
     expect(DEFAULT_OPTICAL_PARAMS.rimPower).toBe(3.5);
     expect(DEFAULT_OPTICAL_PARAMS.sheenIntensity).toBe(0.75);
     expect(DEFAULT_OPTICAL_PARAMS.roughness).toBe(0.03);
+    // Matches the `saturate(180%)` in every CSS `backdrop-filter` fallback literal, so dropping the
+    // fallback for the GPU composite does not visibly desaturate the panel.
+    expect(DEFAULT_OPTICAL_PARAMS.saturation).toBe(1.8);
     expect(DEFAULT_OPTICAL_PARAMS.tintColor).toEqual([1.0, 1.0, 1.0, 0.12]);
   });
 
