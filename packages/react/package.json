@@ -2,6 +2,7 @@
   "name": "@open-glass/react",
   "version": "0.1.0",
   "description": "Declarative React components and GPU bridge for Apple Glass UI",
+  "license": "MIT OR Apache-2.0",
   "files": [
     "dist",
     "src"

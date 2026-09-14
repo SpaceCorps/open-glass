@@ -2,6 +2,7 @@
   "name": "@open-glass/core",
   "version": "0.1.0",
   "description": "Apple Glass optical physics core (Rust/WebAssembly) for the web",
+  "license": "MIT OR Apache-2.0",
   "files": [
     "dist",
     "src",
