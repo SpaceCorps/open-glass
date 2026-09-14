@@ -50,9 +50,7 @@ export const App: React.FC = () => {
               <div style={{ fontWeight: 700, fontSize: "1.125rem", letterSpacing: "-0.02em" }}>
                 Open Glass
               </div>
-              <div style={{ fontSize: "0.75rem", color: "#888" }}>
-                GPU-accelerated Apple Glass UI Framework
-              </div>
+              <div style={{ fontSize: "0.75rem", color: "#888" }}>Apple Glass UI for the web</div>
             </div>
           </div>
 

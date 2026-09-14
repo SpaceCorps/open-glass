@@ -13,7 +13,7 @@
     "build:wasm": "pnpm --filter @open-glass/core build:wasm",
     "build": "pnpm run build:wasm && pnpm run build:core && pnpm -r --filter=!@open-glass/core build",
     "build:core": "pnpm --filter @open-glass/core build",
-    "dev": "pnpm --filter storybook dev"
+    "dev": "pnpm --filter playground dev"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
