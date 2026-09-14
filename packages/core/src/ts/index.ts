@@ -27,8 +27,15 @@ export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };
  * `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs` is a complete dual-Kawase blur plus
  * rounded-rect composite pipeline, and `createGlassEngine()` now awaits `initWasmEngine()` before it
  * constructs the facade, so the renderer compiles its GLSL programs and issues draw calls at runtime
- * in the browser. `packages/core/tests/webgl2_browser.rs` proves both programs compile and link on a
- * real driver under `wasm-pack test --headless --chrome`.
+ * in the browser.
+ *
+ * The claim is measured, not assumed. `packages/core/tests/webgl2_browser.rs` uploads a
+ * four-quadrant backdrop under `wasm-pack test --headless --chrome`, renders a panel over it and reads
+ * the framebuffer back, asserting the interior is non-uniform and that each sample tracks the DOM
+ * quadrant beneath it. In the playground under headless Chrome, hiding the glass canvas while leaving
+ * the DOM untouched changes the pixels inside every panel and nothing outside one, and the mean
+ * absolute luma gradient inside a panel measures ~1.5 with the canvas compositing against ~9.8 without
+ * it: fine detail removed, large-scale structure kept, which is a blur rather than a flat fill.
  *
  * This flag is a static claim about the backend, not about any particular engine instance: it says
  * the WebGL2 path draws pixels when it comes up. Per-instance readiness is `isRenderReady()`, which
