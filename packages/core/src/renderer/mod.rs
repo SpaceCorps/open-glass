@@ -41,6 +41,22 @@ pub trait GlassRenderer {
     fn render(&mut self) -> Result<(), String>;
     /// Retrieve the active graphics backend identifier.
     fn backend_name(&self) -> &'static str;
+
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
+    fn set_background_from_canvas(
+        &mut self,
+        _canvas: &web_sys::HtmlCanvasElement,
+    ) -> Result<(), String> {
+        Err("backend does not support background texture ingestion".to_string())
+    }
+
+    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` into the background texture.
+    fn set_background_from_offscreen_canvas(
+        &mut self,
+        _canvas: &web_sys::OffscreenCanvas,
+    ) -> Result<(), String> {
+        Err("backend does not support background texture ingestion".to_string())
+    }
 }
 
 #[wasm_bindgen]
