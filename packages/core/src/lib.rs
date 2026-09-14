@@ -50,6 +50,17 @@ impl WasmGlassEngine {
         })
     }
 
+    /// Whether a real backdrop raster has ever been uploaded successfully.
+    ///
+    /// The TypeScript facade's `isRenderReady()` requires this on top of a live engine. Without it,
+    /// readiness meant only "the renderer was constructed", and the composite pass painted a uniform
+    /// opaque rectangle over the DOM while every consumer had already dropped its CSS
+    /// `backdrop-filter`.
+    #[wasm_bindgen]
+    pub fn has_real_background(&self) -> bool {
+        self.renderer.has_real_background()
+    }
+
     /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
     #[wasm_bindgen]
     pub fn set_background_from_canvas(&mut self, canvas: HtmlCanvasElement) -> Result<(), JsValue> {

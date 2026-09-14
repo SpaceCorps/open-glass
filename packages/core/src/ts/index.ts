@@ -12,6 +12,7 @@ import type {
   GlassRendererBackend,
   OpticalParams,
 } from "./types";
+import { warnOnce } from "./warn";
 
 export * from "./types";
 export * from "./capture";
@@ -23,18 +24,35 @@ export { calculate_fresnel, init_panic_hook, RendererBackend, WasmGlassEngine };
 /**
  * Whether the renderer backend composites real pixels.
  *
- * The renderer itself is no longer missing: `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs`
- * is a complete dual-Kawase blur plus rounded-rect composite pipeline that issues real draw calls.
- * The flag stays `false` because nothing mounts that engine in a browser — `initWasmEngine()` is
- * called from exactly one place in the repo, `packages/core/tests/wasm-export.test.ts`, so no
- * renderer ever runs at runtime and every glass pixel on screen is still CSS. Flip this to `true`
- * when the engine is initialized and rendering in the browser, not when a backend is written: the
- * blocker is runtime wiring, not a missing renderer.
+ * `WebGl2Renderer` in `packages/core/src/renderer/webgl2.rs` is a complete dual-Kawase blur plus
+ * rounded-rect composite pipeline, and `createGlassEngine()` now awaits `initWasmEngine()` before it
+ * constructs the facade, so the renderer compiles its GLSL programs and issues draw calls at runtime
+ * in the browser.
+ *
+ * The claim is measured, not assumed. `packages/core/tests/webgl2_browser.rs` uploads a
+ * four-quadrant backdrop under `wasm-pack test --headless --chrome`, renders a panel over it and reads
+ * the framebuffer back, asserting the interior is non-uniform and that each sample tracks the DOM
+ * quadrant beneath it. In the playground under headless Chrome, hiding the glass canvas while leaving
+ * the DOM untouched changes the pixels inside every panel and nothing outside one, and the mean
+ * absolute luma gradient inside a panel measures ~1.5 with the canvas compositing against ~9.8 without
+ * it: fine detail removed, large-scale structure kept, which is a blur rather than a flat fill.
+ *
+ * This flag is a static claim about the backend, not about any particular engine instance: it says
+ * the WebGL2 path draws pixels when it comes up. Per-instance readiness is `isRenderReady()`, which
+ * additionally requires a live `wasmEngine` (wasm loaded and the renderer constructed), a
+ * `backgroundSource`, and a backdrop the renderer confirms it actually holds
+ * (`WasmGlassEngine.has_real_background()`) — a headless context, a blocked wasm fetch, a rejected
+ * texture upload or a capture that never rasterized all leave it `false` while this stays `true`.
+ *
+ * That last requirement is not belt-and-braces. `glass_composite.frag` writes `alpha = 1.0` across the
+ * whole rounded-box SDF, so compositing over an empty backdrop paints a uniform opaque rectangle over
+ * the DOM — worse than the CSS fallback. `WebGl2Renderer::render` skips the composite pass entirely
+ * until a backdrop upload has succeeded, and this gate is what keeps consumers on CSS until then.
  *
  * Consumers key their CSS fallback off `GlassEngine.isRenderReady()`, never off
  * `hasBackgroundSource()` — an uploaded texture says nothing about whether anything was drawn with it.
  */
-export const RENDERER_PRODUCES_PIXELS: boolean = false;
+export const RENDERER_PRODUCES_PIXELS: boolean = true;
 
 export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   ior: 1.52,
@@ -156,13 +174,20 @@ export async function negotiateBackend(
     const hasWebGpu = await probeWebGpuSupport();
     if (!hasWebGpu) {
       console.warn("[open-glass] WebGPU requested but not supported; falling back to WebGL2.");
-      return "webgl2";
+    } else {
+      console.warn(
+        "[open-glass] WebGPU is supported by this browser but the WebGPU renderer is not " +
+          "implemented yet; falling back to WebGL2.",
+      );
     }
-    return "webgpu";
+    return "webgl2";
   }
-  // Auto negotiation
-  const hasWebGpu = await probeWebGpuSupport();
-  return hasWebGpu ? "webgpu" : "webgl2";
+  // Auto negotiation always lands on WebGL2 while `WebGpuRenderer::new` is a stub that unconditionally
+  // returns Err (see packages/core/src/renderer/webgpu.rs). Reporting "webgpu" off a resolving
+  // `requestAdapter()` — true on any ordinary modern Chrome — was a lie with teeth: `WasmGlassEngine`
+  // silently falls back to `WebGl2Renderer`, so a live WebGL2 renderer would be labelled "webgpu" and
+  // every backend-gated code path skipped over it. This returns the backend that will actually run.
+  return "webgl2";
 }
 
 class GlassEngineImpl implements GlassEngine {
@@ -173,7 +198,11 @@ class GlassEngineImpl implements GlassEngine {
   private wasmEngine: WasmGlassEngine | null = null;
   private destroyed = false;
   private backgroundSource: BackgroundTextureSource | null = null;
-  private bgTextureWebGL: WebGLTexture | null = null;
+  // No JS-side WebGL background texture. There used to be one, filled by a `texImage2D` fallback in
+  // `updateBackgroundSource`, and nothing in the repo ever sampled it: `WebGl2Renderer` owns its own
+  // `background_texture` and the composite shader only ever reads the blur mip chain. The fallback
+  // wrote pixels into a texture that was allocated, uploaded to and deleted without being drawn, which
+  // made a failed Rust upload look survivable. Removed rather than kept as a decorative no-op.
   private bgTextureWebGPU: unknown = null;
 
   constructor(canvas: HTMLCanvasElement, backend: "webgpu" | "webgl2") {
@@ -205,9 +234,17 @@ class GlassEngineImpl implements GlassEngine {
         const width = this.canvas.width || 300;
         const height = this.canvas.height || 150;
         this.wasmEngine = new WasmGlassEngine(this.canvas, backendEnum, width, height);
-      } catch {
-        // Fall back gracefully to pure JS/WebGL2 if WasmGlassEngine construction fails
+      } catch (error) {
+        // Fall back gracefully to the CSS path if WasmGlassEngine construction fails — but say why.
+        // `WebGl2Renderer::new` formats the driver's own info log (`shader compilation failed: {log}`,
+        // `program link failed: {log}`, `blur framebuffer is incomplete (status {status})`) and this
+        // catch used to discard all of it, so a GLSL error presented as glass that never turned on.
         this.wasmEngine = null;
+        warnOnce(
+          "wasm-renderer-construction",
+          "the wasm glass renderer could not be constructed; falling back to CSS glass:",
+          error,
+        );
       }
     }
   }
@@ -266,60 +303,57 @@ class GlassEngineImpl implements GlassEngine {
 
   /**
    * Hand a canvas-backed backdrop to the Rust renderer, which owns the WebGL2 background texture.
-   * Returns false when Rust cannot accept this source, so the caller falls back to the JS upload.
+   *
+   * `uploaded` is false when Rust cannot accept this source, so the caller falls back to the JS
+   * upload. `error` carries a thrown rejection rather than warning about it here: the JS path may
+   * still accept the same source, and only a failure of *both* paths is worth telling anyone about.
    */
-  private uploadBackgroundViaWasm(source: BackgroundTextureSource): boolean {
-    if (!this.wasmEngine) return false;
+  private uploadBackgroundViaWasm(source: BackgroundTextureSource): {
+    uploaded: boolean;
+    error: unknown;
+  } {
+    if (!this.wasmEngine) return { uploaded: false, error: null };
     try {
       if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) {
         this.wasmEngine.set_background_from_canvas(source);
-        return true;
+        return { uploaded: true, error: null };
       }
       if (typeof OffscreenCanvas !== "undefined" && source instanceof OffscreenCanvas) {
         this.wasmEngine.set_background_from_offscreen_canvas(source);
-        return true;
+        return { uploaded: true, error: null };
       }
-    } catch {
-      // Fall through to the JS texImage2D path if the Rust upload rejects the source
+    } catch (error) {
+      return { uploaded: false, error };
     }
-    return false;
+    return { uploaded: false, error: null };
   }
 
   updateBackgroundSource(source: BackgroundTextureSource): void {
     if (this.destroyed) return;
     this.backgroundSource = source;
 
+    // Thrown upload failures accumulate here instead of being swallowed. A tainted capture canvas
+    // makes *every* upload route throw `SecurityError`, and with both catches silent the symptom was
+    // glass that composites over a permanently blank texture — flat, and with nothing in the console.
+    let uploadError: unknown = null;
+
+    // Routed off the presence of the wasm engine, deliberately not off `this.backend`. The renderer
+    // that actually runs is `WebGl2Renderer` whatever `negotiateBackend` reported, so gating the
+    // upload on `backend === "webgl2"` meant a browser negotiated onto any other backend kept a live
+    // wasm renderer that could never be handed a backdrop — and composited a grey block over the DOM
+    // because `backgroundSource` was assigned anyway.
+    //
     // ImageBitmap / ImageData / HTMLImageElement / HTMLVideoElement are not accepted by the Rust
-    // entry points, so those keep using the JS upload below.
-    if (this.backend === "webgl2" && this.uploadBackgroundViaWasm(source)) {
-      return;
+    // entry points; those sources leave the backdrop untouched, which `isRenderReady()` reflects.
+    if (this.wasmEngine) {
+      const wasmUpload = this.uploadBackgroundViaWasm(source);
+      if (wasmUpload.uploaded) {
+        return;
+      }
+      uploadError = wasmUpload.error;
     }
 
-    if (this.backend === "webgl2" && this.glContext) {
-      const gl = this.glContext;
-      try {
-        if (!this.bgTextureWebGL) {
-          this.bgTextureWebGL = gl.createTexture();
-        }
-        if (this.bgTextureWebGL) {
-          gl.bindTexture(gl.TEXTURE_2D, this.bgTextureWebGL);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            gl.RGBA,
-            gl.RGBA,
-            gl.UNSIGNED_BYTE,
-            source as TexImageSource,
-          );
-        }
-      } catch {
-        // Fallback gracefully if context is mock or in headless environment
-      }
-    } else if (this.backend === "webgpu") {
+    if (this.backend === "webgpu") {
       try {
         const gpuNav = typeof navigator !== "undefined" ? (navigator as any).gpu : null;
         if (gpuNav && (this.canvas as any)._gpuDevice) {
@@ -341,9 +375,18 @@ class GlassEngineImpl implements GlassEngine {
             );
           }
         }
-      } catch {
-        // Fallback gracefully
+      } catch (error) {
+        uploadError = error;
       }
+    }
+
+    if (uploadError) {
+      warnOnce(
+        "background-texture-upload",
+        "failed to upload the backdrop texture; the glass composite has no content to refract " +
+          "and will render flat:",
+        uploadError,
+      );
     }
   }
 
@@ -351,12 +394,35 @@ class GlassEngineImpl implements GlassEngine {
     return this.backgroundSource !== null;
   }
 
+  /**
+   * Whether the renderer holds a backdrop raster it can actually refract.
+   *
+   * Asked of Rust rather than inferred from `backgroundSource`, because assigning that field says
+   * only that a source was handed over — not that `texImage2D` accepted it. `WebGl2Renderer` sets its
+   * own flag exclusively on a successful upload, never for the 1x1 transparent seed it allocates at
+   * construction.
+   */
+  private hasRealBackdrop(): boolean {
+    if (!this.wasmEngine) return false;
+    try {
+      return this.wasmEngine.has_real_background();
+    } catch {
+      // An older wasm binary without the export: treat the unknown as not ready rather than claiming
+      // a backdrop we cannot confirm.
+      return false;
+    }
+  }
+
   isRenderReady(): boolean {
     return (
       RENDERER_PRODUCES_PIXELS &&
       !this.destroyed &&
       this.backgroundSource !== null &&
-      this.wasmEngine !== null
+      this.wasmEngine !== null &&
+      // A live renderer is not a drawn frame: without a real backdrop the composite pass is skipped
+      // (see WebGl2Renderer::render), so reporting readiness here would strip every consumer's CSS
+      // blur in exchange for an empty canvas.
+      this.hasRealBackdrop()
     );
   }
 
@@ -369,8 +435,9 @@ class GlassEngineImpl implements GlassEngine {
       try {
         this.wasmEngine.render();
         return;
-      } catch {
-        // Fallback to WebGL2 clear if wasm render errors in headless/mock context
+      } catch (error) {
+        // Fallback to a WebGL2 clear if wasm render errors in a headless/mock context.
+        warnOnce("wasm-render", "the wasm renderer threw while drawing a frame:", error);
       }
     }
     if (this.glContext) {
@@ -389,14 +456,6 @@ class GlassEngineImpl implements GlassEngine {
         // ignore
       }
       this.wasmEngine = null;
-    }
-    if (this.glContext && this.bgTextureWebGL) {
-      try {
-        this.glContext.deleteTexture(this.bgTextureWebGL);
-      } catch {
-        // ignore
-      }
-      this.bgTextureWebGL = null;
     }
     if (this.bgTextureWebGPU) {
       try {
@@ -420,10 +479,28 @@ export async function createGlassEngine(
   config: GlassEngineConfig = {},
 ): Promise<GlassEngine> {
   const backend = await negotiateBackend(config.backend ?? "auto");
+
+  // Mount the wasm optical engine before constructing the facade: GlassEngineImpl's constructor only
+  // builds a WasmGlassEngine when isWasmEngineLoaded() is already true. Failure here is not fatal —
+  // no WebGL2, a blocked wasm fetch or a headless context must still yield a working engine that
+  // degrades to the CSS fallback, so this never rethrows.
+  try {
+    await initWasmEngine();
+  } catch (error) {
+    console.warn(
+      "[open-glass] wasm optical engine failed to initialize; using CSS fallback:",
+      error,
+    );
+  }
+
   const engine = new GlassEngineImpl(canvas, backend);
 
-  const initialWidth = config.width ?? canvas.clientWidth ?? 300;
-  const initialHeight = config.height ?? canvas.clientHeight ?? 150;
+  // An explicit zero check, not `??`: an unlaid-out canvas reports clientWidth 0, which is a
+  // perfectly defined number, so `??` would never fire and the engine would start 0x0.
+  const measuredWidth = canvas.clientWidth > 0 ? canvas.clientWidth : 300;
+  const measuredHeight = canvas.clientHeight > 0 ? canvas.clientHeight : 150;
+  const initialWidth = config.width && config.width > 0 ? config.width : measuredWidth;
+  const initialHeight = config.height && config.height > 0 ? config.height : measuredHeight;
   engine.resize(initialWidth, initialHeight);
 
   return engine;

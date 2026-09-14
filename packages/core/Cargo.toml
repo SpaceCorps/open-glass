@@ -34,3 +34,12 @@ web-sys = { version = "0.3", features = [
 glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1.21", features = ["derive"] }
 console_error_panic_hook = "0.1"
+
+# Target-gated so a host `cargo build` / `cargo test` never pulls it in: only the wasm32 target can
+# run `tests/webgl2_browser.rs`, which needs a real browser with a WebGL2 driver.
+#
+# The extra web-sys feature is for the pixel tests only: they paint a non-uniform backdrop with a 2D
+# canvas context before uploading it, which the renderer itself never needs.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+web-sys = { version = "0.3", features = ["CanvasRenderingContext2d"] }

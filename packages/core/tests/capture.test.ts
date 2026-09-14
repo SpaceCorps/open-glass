@@ -113,14 +113,23 @@ describe("packages/core DomCapturePipeline and texture ingestion", () => {
     engine.updateBackgroundSource(sourceCanvas);
     expect(engine.hasBackgroundSource()).toBe(true);
 
+    // Accepting a source is not the same as being able to refract it. The mock context is not a real
+    // WebGl2RenderingContext, so the Rust renderer never came up and there is nothing to composite.
+    expect(engine.isRenderReady?.() ?? false).toBe(false);
+
+    // Nothing on the JS side uploads a texture any more: `WebGl2Renderer` owns the background texture,
+    // and the old `texImage2D` fallback wrote into a JS texture no sampler ever read. Its absence is
+    // asserted rather than merely unmentioned, so reintroducing the dead upload fails here.
+    expect(mockGl.texImage2D).not.toHaveBeenCalled();
+    expect(mockGl.createTexture).not.toHaveBeenCalled();
+
     // Calling render with background source active
     engine.render();
     expect(mockGl.clear).toHaveBeenCalled();
 
-    // engine.destroy cleans up background textures
     engine.destroy();
     expect(engine.hasBackgroundSource()).toBe(false);
-    expect(mockGl.deleteTexture).toHaveBeenCalled();
+    expect(mockGl.deleteTexture).not.toHaveBeenCalled();
   });
 });
 
@@ -171,7 +180,7 @@ describe("capture failure handling", () => {
     return el;
   };
 
-  it("clears dirty on failure and backs off instead of retrying every frame", async () => {
+  it("keeps dirty set on failure and backs off instead of retrying every frame", async () => {
     const el = attachedElement();
     const onError = vi.fn();
     const pipeline = new DomCapturePipeline(el, {
@@ -190,7 +199,10 @@ describe("capture failure handling", () => {
 
     const firstResult = await pipeline.capture();
     expect(firstResult).toBeNull();
-    expect(pipeline.isDirty).toBe(false);
+    // Still dirty: nothing was captured, so the target remains unrepresented and a later attempt must
+    // be allowed through. Clearing it made the first failure permanent, because `capture()` returns the
+    // cached frame early on `!dirty`.
+    expect(pipeline.isDirty).toBe(true);
     expect(pipeline.failureCount).toBe(1);
 
     const totalCalls = 60;
@@ -207,10 +219,46 @@ describe("capture failure handling", () => {
     expect(onError).toHaveBeenCalledTimes(3);
     expect(onError).toHaveBeenLastCalledWith(expect.any(Error), 3);
     expect((pipeline.lastCaptureError as Error).message).toBe("rasterization failed");
-    expect(pipeline.isDirty).toBe(false);
+    // Bounded by the circuit breaker, not by dropping the dirty flag: the work is still outstanding.
+    expect(pipeline.isDirty).toBe(true);
 
     pipeline.destroy();
     document.body.removeChild(el);
+  });
+
+  it("rejects when the foreignObject raster fails to load instead of resolving a blank canvas", async () => {
+    const el = attachedElement();
+    const pipeline = new DomCapturePipeline(el, { fps: 60 });
+
+    // jsdom never loads an image, so neither handler fires on its own: stand in an Image whose `src`
+    // setter reports the failure the real browser reports when the SVG payload cannot be decoded.
+    const OriginalImage = globalThis.Image;
+    class FailingImage {
+      onload: (() => void) | null = null;
+      onerror: ((event: unknown) => void) | null = null;
+      set src(_value: string) {
+        this.onerror?.(new Event("error"));
+      }
+    }
+    (globalThis as any).Image = FailingImage;
+
+    try {
+      // Used to resolve an OffscreenCanvas that had never been drawn into — truthy, uploaded as an
+      // all-zero texture, and indistinguishable from a good frame to every caller.
+      await expect(pipeline.captureElement(el)).rejects.toThrow(
+        /foreignObject raster did not load/,
+      );
+
+      const result = await pipeline.capture();
+      expect(result).toBeNull();
+      expect(pipeline.failureCount).toBe(1);
+      expect(pipeline.lastCaptureError).toBeInstanceOf(Error);
+      expect(pipeline.isDirty).toBe(true);
+    } finally {
+      (globalThis as any).Image = OriginalImage;
+      pipeline.destroy();
+      document.body.removeChild(el);
+    }
   });
 
   it("invalidate() resets the failure backoff so a real DOM change gets a fresh attempt", async () => {

@@ -38,6 +38,11 @@ const mockContext = (overrides: Partial<GlassContextValue> = {}): GlassContextVa
   ...overrides,
 });
 
+const dockItems = [
+  { id: "finder", label: "Finder", icon: <span>📁</span> },
+  { id: "terminal", label: "Terminal", icon: <span>💻</span> },
+];
+
 describe("Open Glass React Components", () => {
   it("renders GlassCard with custom elevation and children", () => {
     render(
@@ -397,6 +402,64 @@ describe("Open Glass React Components", () => {
 
     expect(windowEl.style.backdropFilter).toBe("none");
     expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.05)");
+  });
+
+  it("hands GlassDock, GlassNavbar and GlassButton over to the GPU on the same signal", () => {
+    // All three register quads through useGlassElement, so the composite paints over them whether or
+    // not they participate in the handover. They used to hardcode `backdropFilter`, which stacked the
+    // CSS blur underneath an opaque GPU panel — two glass models fighting in one scene.
+    const { unmount } = render(
+      <GlassContext.Provider
+        value={mockContext({ hasBackgroundSource: true, isRenderReady: false })}
+      >
+        <GlassDock items={dockItems} data-testid="fallback-dock" />
+        <GlassNavbar data-testid="fallback-navbar">Navbar</GlassNavbar>
+        <GlassButton data-testid="fallback-button">Button</GlassButton>
+      </GlassContext.Provider>,
+    );
+
+    expect(screen.getByTestId("fallback-dock").style.backdropFilter).toContain("blur(28px)");
+    expect(screen.getByTestId("fallback-navbar").style.backdropFilter).toContain("blur(24px)");
+    expect(screen.getByTestId("fallback-button").style.backdropFilter).toContain("blur(16px)");
+
+    unmount();
+
+    render(
+      <GlassContext.Provider
+        value={mockContext({ hasBackgroundSource: true, isRenderReady: true })}
+      >
+        <GlassDock items={dockItems} data-testid="gpu-dock" />
+        <GlassNavbar data-testid="gpu-navbar">Navbar</GlassNavbar>
+        <GlassButton data-testid="gpu-button">Button</GlassButton>
+      </GlassContext.Provider>,
+    );
+
+    const dock = screen.getByTestId("gpu-dock");
+    const navbar = screen.getByTestId("gpu-navbar");
+    const button = screen.getByTestId("gpu-button");
+
+    expect(dock.style.backdropFilter).toBe("none");
+    expect(dock.style.background).toBe("rgba(255, 255, 255, 0.04)");
+    expect(navbar.style.backdropFilter).toBe("none");
+    expect(navbar.style.background).toBe("rgba(255, 255, 255, 0.03)");
+    expect(button.style.backdropFilter).toBe("none");
+    expect(button.style.background).toBe("rgba(255, 255, 255, 0.08)");
+  });
+
+  it("keeps the dock, navbar and button on CSS glass with no provider at all", () => {
+    // `useContext` outside a GlassProvider yields undefined, and a missing renderer must never be read
+    // as a ready one.
+    render(
+      <>
+        <GlassDock items={dockItems} data-testid="bare-dock" />
+        <GlassNavbar data-testid="bare-navbar">Navbar</GlassNavbar>
+        <GlassButton data-testid="bare-button">Button</GlassButton>
+      </>,
+    );
+
+    expect(screen.getByTestId("bare-dock").style.backdropFilter).toContain("blur(28px)");
+    expect(screen.getByTestId("bare-navbar").style.backdropFilter).toContain("blur(24px)");
+    expect(screen.getByTestId("bare-button").style.backdropFilter).toContain("blur(16px)");
   });
 
   it("treats an engine without isRenderReady as not ready and keeps the fallback", () => {

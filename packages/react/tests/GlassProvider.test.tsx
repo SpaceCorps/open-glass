@@ -347,8 +347,12 @@ describe("GlassProvider capture errors", () => {
 
     expect(warn).toHaveBeenCalledWith("[open-glass] DOM capture failed:", expect.any(Error));
     expect(onCaptureError).toHaveBeenCalledWith(expect.any(Error));
-    // The failed frame must not leave the pipeline dirty, or it re-serializes forever.
-    expect(pipeline!.isDirty).toBe(false);
+    // The failed frame leaves the pipeline dirty: nothing was captured, so the work is still
+    // outstanding and a later frame must be allowed to try again. Clearing it made the first failure
+    // permanent — `capture()` returns early on `!dirty`, so a transient rasterization failure at mount
+    // meant no backdrop for the lifetime of the page. Re-serializing every frame is prevented by the
+    // retry backoff and the `isFailing` circuit breaker instead, which the failure count reflects.
+    expect(pipeline!.isDirty).toBe(true);
     expect(pipeline!.failureCount).toBe(1);
   });
 });
