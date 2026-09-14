@@ -2,6 +2,7 @@ import React, { forwardRef, useContext, type HTMLAttributes, type ReactNode } fr
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { GLASS_Z_SURFACE } from "../layers";
 
 export interface GlassCardProps extends HTMLAttributes<HTMLDivElement> {
   children?: ReactNode;
@@ -31,7 +32,9 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
     });
 
     const context = useContext(GlassContext);
-    const hasBackgroundSource = context?.hasBackgroundSource ?? false;
+    // Keyed off renderer readiness, not `hasBackgroundSource`: a texture having been uploaded is no
+    // evidence the GPU drew anything, and dropping the blur before it does leaves nothing visible.
+    const isRenderReady = context?.isRenderReady ?? false;
 
     const elevationStyles: Record<string, React.CSSProperties> = {
       flat: {
@@ -58,13 +61,12 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
         className={`open-glass-card ${interactive ? "interactive" : ""} ${className ?? ""}`}
         style={{
           position: "relative",
+          zIndex: GLASS_Z_SURFACE,
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.28)",
-          background: hasBackgroundSource
-            ? "rgba(255, 255, 255, 0.03)"
-            : "rgba(255, 255, 255, 0.15)",
-          backdropFilter: hasBackgroundSource ? "none" : "blur(20px)",
-          WebkitBackdropFilter: hasBackgroundSource ? "none" : "blur(20px)",
+          background: isRenderReady ? "rgba(255, 255, 255, 0.03)" : "rgba(255, 255, 255, 0.15)",
+          backdropFilter: isRenderReady ? "none" : "blur(20px)",
+          WebkitBackdropFilter: isRenderReady ? "none" : "blur(20px)",
           overflow: "hidden",
           transition: interactive ? "transform 0.2s ease, box-shadow 0.2s ease" : undefined,
           ...elevationStyles[elevation],

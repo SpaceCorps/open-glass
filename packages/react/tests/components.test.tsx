@@ -4,7 +4,8 @@
 import React from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { GlassContext, GlassProvider } from "../src/context/GlassContext";
+import type { GlassEngine } from "@open-glass/core";
+import { GlassContext, type GlassContextValue, GlassProvider } from "../src/context/GlassContext";
 
 import { GlassCard } from "../src/components/GlassCard";
 import { GlassWindow } from "../src/components/GlassWindow";
@@ -23,6 +24,18 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+});
+
+const mockContext = (overrides: Partial<GlassContextValue> = {}): GlassContextValue => ({
+  engine: null,
+  registerElement: vi.fn(),
+  updateElement: vi.fn(),
+  unregisterElement: vi.fn(),
+  hasBackgroundSource: false,
+  isRenderReady: false,
+  containerRef: { current: null },
+  ...overrides,
 });
 
 describe("Open Glass React Components", () => {
@@ -338,17 +351,37 @@ describe("Open Glass React Components", () => {
     expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.22)");
   });
 
-  it("dials down CSS backdrop-filter when active GPU background capture is present", () => {
-    const mockContextValue = {
-      engine: null,
-      registerElement: vi.fn(),
-      updateElement: vi.fn(),
-      unregisterElement: vi.fn(),
-      hasBackgroundSource: true,
-    };
-
+  it("keeps the CSS fallback when a background texture exists but the renderer draws nothing", () => {
+    // hasBackgroundSource only says a texture was uploaded. Dropping the blur on that signal alone
+    // is what left every panel invisible while the renderer was still a stub.
     render(
-      <GlassContext.Provider value={mockContextValue}>
+      <GlassContext.Provider
+        value={mockContext({ hasBackgroundSource: true, isRenderReady: false })}
+      >
+        <GlassCard data-testid="texture-card">Card Text</GlassCard>
+        <GlassWindow title="Texture Window" data-testid="texture-window">
+          Window Content
+        </GlassWindow>
+      </GlassContext.Provider>,
+    );
+
+    const card = screen.getByTestId("texture-card");
+    const windowEl = screen.getByTestId("texture-window");
+
+    expect(card.style.backdropFilter).not.toBe("none");
+    expect(card.style.backdropFilter).toContain("blur(20px)");
+    expect(card.style.background).toBe("rgba(255, 255, 255, 0.15)");
+
+    expect(windowEl.style.backdropFilter).not.toBe("none");
+    expect(windowEl.style.backdropFilter).toContain("blur(32px)");
+    expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.22)");
+  });
+
+  it("dials down CSS backdrop-filter once the renderer reports it is compositing pixels", () => {
+    render(
+      <GlassContext.Provider
+        value={mockContext({ hasBackgroundSource: true, isRenderReady: true })}
+      >
         <GlassCard data-testid="gpu-card">Card Text</GlassCard>
         <GlassWindow title="GPU Window" data-testid="gpu-window">
           Window Content
@@ -364,5 +397,90 @@ describe("Open Glass React Components", () => {
 
     expect(windowEl.style.backdropFilter).toBe("none");
     expect(windowEl.style.background).toBe("rgba(240, 240, 245, 0.05)");
+  });
+
+  it("treats an engine without isRenderReady as not ready and keeps the fallback", () => {
+    const legacyEngine = {
+      backend: "webgl2",
+      canvas: document.createElement("canvas"),
+      resize: vi.fn(),
+      updateQuads: vi.fn(),
+      updateBackgroundSource: vi.fn(),
+      hasBackgroundSource: vi.fn().mockReturnValue(true),
+      render: vi.fn(),
+      destroy: vi.fn(),
+    } as unknown as GlassEngine;
+
+    expect(legacyEngine.isRenderReady?.() ?? false).toBe(false);
+
+    render(
+      <GlassContext.Provider
+        value={mockContext({
+          engine: legacyEngine,
+          hasBackgroundSource: true,
+          isRenderReady: legacyEngine.isRenderReady?.() ?? false,
+        })}
+      >
+        <GlassCard data-testid="legacy-card">Card Text</GlassCard>
+      </GlassContext.Provider>,
+    );
+
+    expect(screen.getByTestId("legacy-card").style.backdropFilter).toContain("blur(20px)");
+  });
+
+  it("preserves a caller transform on GlassWindow instead of clobbering the parallax tilt", () => {
+    render(
+      <GlassProvider>
+        <GlassWindow
+          variant="visionos"
+          title="Positioned Window"
+          data-testid="positioned-window"
+          style={{ transform: "translate(10px, 20px)" }}
+        >
+          <div>Content</div>
+        </GlassWindow>
+      </GlassProvider>,
+    );
+
+    const windowEl = screen.getByTestId("positioned-window");
+
+    expect(windowEl.style.transform).toContain("translate(10px, 20px)");
+    expect(windowEl.style.transform).toContain("perspective(1000px)");
+    expect(windowEl.style.transform).toContain("rotateX(");
+
+    vi.spyOn(windowEl, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 200,
+      height: 200,
+      right: 200,
+      bottom: 200,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    fireEvent.pointerMove(windowEl, { clientX: 150, clientY: 150 });
+
+    // Both survive the tilt update: the caller's placement and the tilt itself.
+    expect(windowEl.style.transform).toContain("translate(10px, 20px)");
+    expect(windowEl.style.transform).toContain("rotateX(-3deg)");
+    expect(windowEl.style.transform).toContain("rotateY(3deg)");
+  });
+
+  it("preserves a caller transform on GlassButton alongside the press scale", () => {
+    render(
+      <GlassProvider>
+        <GlassButton style={{ transform: "translateY(4px)" }}>Press Me</GlassButton>
+      </GlassProvider>,
+    );
+
+    const btn = screen.getByRole("button", { name: "Press Me" });
+    expect(btn.style.transform).toContain("translateY(4px)");
+    expect(btn.style.transform).toContain("scale(1)");
+
+    fireEvent.pointerDown(btn);
+    expect(btn.style.transform).toContain("translateY(4px)");
+    expect(btn.style.transform).toContain("scale(0.97)");
   });
 });

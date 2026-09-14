@@ -55,6 +55,12 @@ export interface GlassEngine {
   updateBackgroundSource(source: BackgroundTextureSource): void;
   /** Check if a valid background texture has been provided. */
   hasBackgroundSource(): boolean;
+  /**
+   * Whether the backend is actually compositing glass pixels, so consumers can drop their CSS
+   * fallback. Optional: a stand-in engine need not implement it, and callers must treat a missing
+   * implementation as `false` (`engine.isRenderReady?.() ?? false`).
+   */
+  isRenderReady?(): boolean;
   render(): void;
   destroy(): void;
 }
