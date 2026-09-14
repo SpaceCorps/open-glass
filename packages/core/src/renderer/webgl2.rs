@@ -82,6 +82,10 @@ pub struct WebGl2Renderer {
     quad_vao: WebGlVertexArrayObject,
     quad_buffer: WebGlBuffer,
     background_texture: WebGlTexture,
+    /// False until a `set_background_from_*` upload has actually succeeded. The 1x1 transparent seed
+    /// in [`Self::create_background_texture`] deliberately does not count: see
+    /// [`GlassRenderer::has_real_background`].
+    has_real_background: bool,
     mip_chain: Vec<MipLevel>,
 }
 
@@ -311,6 +315,7 @@ impl WebGl2Renderer {
             quad_vao,
             quad_buffer,
             background_texture,
+            has_real_background: false,
             mip_chain,
         })
     }
@@ -392,6 +397,19 @@ impl WebGl2Renderer {
         Ok(texture)
     }
 
+    /// Clear the default framebuffer to fully transparent, drawing nothing else.
+    ///
+    /// This is what `render()` does instead of compositing when there is no real backdrop: a
+    /// transparent canvas lets the DOM — and each component's CSS `backdrop-filter` — show through
+    /// untouched, which is the behaviour the readiness gate promises consumers.
+    fn clear_canvas(&self) {
+        let gl = &self.gl;
+        gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
+        gl.viewport(0, 0, self.width as i32, self.height as i32);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(Gl::COLOR_BUFFER_BIT);
+    }
+
     /// Release the current mip chain's GPU objects.
     fn delete_mip_chain(&mut self) {
         for level in std::mem::take(&mut self.mip_chain) {
@@ -409,17 +427,14 @@ impl WebGl2Renderer {
 
         // Downsample: level 0 samples the backdrop, level n samples level n-1.
         for level in 0..self.mip_chain.len() {
-            let (source_texture, source_width, source_height) = if level == 0 {
-                (&self.background_texture, self.width, self.height)
+            let source_texture = if level == 0 {
+                &self.background_texture
             } else {
-                let previous = &self.mip_chain[level - 1];
-                (&previous.texture, previous.width, previous.height)
+                &self.mip_chain[level - 1].texture
             };
             self.draw_blur_pass(
                 &self.mip_chain[level],
                 source_texture,
-                source_width,
-                source_height,
                 physics::dual_kawase_down_step(level as u32, blur_radius),
             );
         }
@@ -430,30 +445,31 @@ impl WebGl2Renderer {
             self.draw_blur_pass(
                 &self.mip_chain[level],
                 &source.texture,
-                source.width,
-                source.height,
                 physics::dual_kawase_up_step(level as u32, blur_radius),
             );
         }
     }
 
     /// Render one 4-tap Kawase pass from `source` into `target`.
-    fn draw_blur_pass(
-        &self,
-        target: &MipLevel,
-        source: &WebGlTexture,
-        source_width: u32,
-        source_height: u32,
-        offset: f32,
-    ) {
+    ///
+    /// `u_texel_size` is the *drawing buffer's* texel size, deliberately not the source mip level's.
+    /// `dual_kawase_*_step` returns a step in full-resolution pixels that grows with the level
+    /// (`(level + 1) * blur_radius / 4`), while each level is half the size of the one above it — so
+    /// dividing by the level's own dimensions inflated the same step into an ever-larger *fraction of
+    /// the image*. At level 4 of a 512x256 canvas that was a 20-texel offset against a 32x16 texture:
+    /// 0.625 in UV, over half the frame per tap. The chain averaged the entire backdrop into one flat
+    /// colour, which is why a panel over a colourful page still rendered as uniform grey. Expressing
+    /// the offset against the full-resolution size keeps it a fixed physical distance at every level,
+    /// which is what the pyramid expects: the depth supplies the radius, each tap stays local.
+    fn draw_blur_pass(&self, target: &MipLevel, source: &WebGlTexture, offset: f32) {
         let gl = &self.gl;
         gl.bind_framebuffer(Gl::FRAMEBUFFER, Some(&target.framebuffer));
         gl.viewport(0, 0, target.width as i32, target.height as i32);
         gl.bind_texture(Gl::TEXTURE_2D, Some(source));
         gl.uniform2f(
             self.blur_uniforms.texel_size.as_ref(),
-            1.0 / source_width.max(1) as f32,
-            1.0 / source_height.max(1) as f32,
+            1.0 / self.width.max(1) as f32,
+            1.0 / self.height.max(1) as f32,
         );
         gl.uniform1f(self.blur_uniforms.offset.as_ref(), offset);
         gl.draw_arrays(Gl::TRIANGLES, 0, 3);
@@ -540,6 +556,15 @@ impl GlassRenderer for WebGl2Renderer {
         }
 
         self.gl.disable(Gl::BLEND);
+
+        // Nothing to refract yet. Compositing here would blur a transparent 1x1 seed into a flat
+        // colour and then paint it at `alpha = 1.0` over the whole panel, hiding the content the
+        // glass is supposed to show. Clear instead, and leave the CSS fallback in charge.
+        if !self.has_real_background {
+            self.clear_canvas();
+            return Ok(());
+        }
+
         self.gl.bind_vertex_array(Some(&self.quad_vao));
 
         self.run_blur_passes(average_blur_radius(&self.quads));
@@ -553,6 +578,10 @@ impl GlassRenderer for WebGl2Renderer {
         "webgl2"
     }
 
+    fn has_real_background(&self) -> bool {
+        self.has_real_background
+    }
+
     fn set_background_from_canvas(&mut self, canvas: &HtmlCanvasElement) -> Result<(), String> {
         let gl = &self.gl;
         bind_background_for_upload(gl, &self.background_texture);
@@ -564,7 +593,14 @@ impl GlassRenderer for WebGl2Renderer {
             Gl::UNSIGNED_BYTE,
             canvas,
         )
-        .map_err(|_| "unable to upload the canvas backdrop into the background texture".to_string())
+        .map_err(|_| {
+            "unable to upload the canvas backdrop into the background texture".to_string()
+        })?;
+        // Only a successful upload earns readiness. A `SecurityError` from a tainted canvas lands in
+        // the `map_err` above and leaves the flag false, so a failed upload degrades instead of
+        // compositing over whatever the texture happened to hold.
+        self.has_real_background = true;
+        Ok(())
     }
 
     fn set_background_from_offscreen_canvas(
@@ -583,7 +619,9 @@ impl GlassRenderer for WebGl2Renderer {
         )
         .map_err(|_| {
             "unable to upload the offscreen backdrop into the background texture".to_string()
-        })
+        })?;
+        self.has_real_background = true;
+        Ok(())
     }
 }
 

@@ -42,6 +42,20 @@ pub trait GlassRenderer {
     /// Retrieve the active graphics backend identifier.
     fn backend_name(&self) -> &'static str;
 
+    /// Whether a real backdrop raster has ever been uploaded into this renderer.
+    ///
+    /// This is the difference between "a background texture exists" and "a background texture holds
+    /// content". `glass_composite.frag` writes `alpha = 1.0` everywhere inside the rounded-box SDF
+    /// and adds a backdrop-independent sheen floor, so compositing over an empty backdrop paints a
+    /// uniform opaque rectangle that hides the DOM behind it — strictly worse than the CSS fallback
+    /// it replaces. The opaque output is correct once the texture holds real content; the bug is
+    /// compositing, and claiming readiness, before it does. Both `render()` and the TypeScript
+    /// readiness gate key off this, so a backend that never receives a backdrop degrades to a
+    /// transparent canvas rather than a grey block.
+    fn has_real_background(&self) -> bool {
+        false
+    }
+
     /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
     fn set_background_from_canvas(
         &mut self,
