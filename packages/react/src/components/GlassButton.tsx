@@ -55,6 +55,10 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
       onPointerLeave?.(e);
     };
 
+    // Merge rather than pick a winner: a caller's transform and the press scale must coexist.
+    const pressScale = isPressed ? "scale(0.97)" : "scale(1)";
+    const combinedTransform = style?.transform ? `${style.transform} ${pressScale}` : pressScale;
+
     return (
       <button
         ref={(node) => {
@@ -92,10 +96,12 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
           cursor: "pointer",
           overflow: "hidden",
           userSelect: "none",
-          transform: isPressed ? "scale(0.97)" : "scale(1)",
           transition: "transform 0.1s ease, box-shadow 0.15s ease",
           outline: "none",
           ...style,
+          // After `...style`: the caller's transform is already folded into combinedTransform, and
+          // spreading it last would drop the press scale.
+          transform: combinedTransform,
         }}
         {...rest}
       >

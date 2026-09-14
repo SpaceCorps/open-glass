@@ -9,6 +9,7 @@ import React, {
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { GLASS_Z_SURFACE } from "../layers";
 
 import { useParallaxTilt } from "../hooks/useParallaxTilt";
 
@@ -60,7 +61,9 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
     });
 
     const context = useContext(GlassContext);
-    const hasBackgroundSource = context?.hasBackgroundSource ?? false;
+    // Keyed off renderer readiness, not `hasBackgroundSource`: a texture having been uploaded is no
+    // evidence the GPU drew anything, and dropping the blur before it does leaves nothing visible.
+    const isRenderReady = context?.isRenderReady ?? false;
 
     const isVisionOS = variant === "visionos";
     const shouldEnableParallax = enableParallax ?? isVisionOS;
@@ -123,6 +126,14 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
         : style.transform
       : transform3d;
 
+    const resolvedTransition =
+      style?.transition ??
+      (isParallaxActive
+        ? isHovered
+          ? "transform 0.1s cubic-bezier(0.2, 0, 0, 1)"
+          : "transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1)"
+        : "none");
+
     return (
       <div
         ref={(node) => {
@@ -144,20 +155,21 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
         }}
         style={{
           position: "relative",
+          zIndex: GLASS_Z_SURFACE,
           borderRadius: `${cornerRadius}px`,
           border:
             variant === "visionos"
               ? "1.5px solid rgba(255, 255, 255, 0.45)"
               : "1px solid rgba(255, 255, 255, 0.3)",
-          background: hasBackgroundSource
+          background: isRenderReady
             ? variant === "visionos"
               ? "rgba(255, 255, 255, 0.04)"
               : "rgba(240, 240, 245, 0.05)"
             : variant === "visionos"
               ? "rgba(255, 255, 255, 0.18)"
               : "rgba(240, 240, 245, 0.22)",
-          backdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
-          WebkitBackdropFilter: hasBackgroundSource ? "none" : "blur(32px) saturate(180%)",
+          backdropFilter: isRenderReady ? "none" : "blur(32px) saturate(180%)",
+          WebkitBackdropFilter: isRenderReady ? "none" : "blur(32px) saturate(180%)",
           boxShadow:
             variant === "visionos"
               ? "0 30px 80px rgba(0, 0, 0, 0.35), 0 0 40px rgba(255, 255, 255, 0.15)"
@@ -167,15 +179,11 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
           flexDirection: "column",
           transformStyle: "preserve-3d",
           perspective: "1000px",
-          transform: combinedTransform,
-          transition:
-            style?.transition ??
-            (isParallaxActive
-              ? isHovered
-                ? "transform 0.1s cubic-bezier(0.2, 0, 0, 1)"
-                : "transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1)"
-              : "none"),
           ...style,
+          // After `...style`: the caller's transform is already folded into combinedTransform, and
+          // spreading it last would drop the parallax tilt appended to it.
+          transform: combinedTransform,
+          transition: resolvedTransition,
         }}
         {...rest}
       >
