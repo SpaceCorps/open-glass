@@ -253,15 +253,7 @@ export class DomCapturePipeline {
       }
 
       const img = new Image();
-      let blobUrl: string | null = null;
       let settled = false;
-
-      const cleanup = () => {
-        if (!settled && blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) {
-          URL.revokeObjectURL(blobUrl);
-        }
-        settled = true;
-      };
 
       img.onload = () => {
         try {
@@ -282,51 +274,49 @@ export class DomCapturePipeline {
             if (ctx) {
               ctx.drawImage(img as any, 0, 0, width, height);
             }
-            cleanup();
+            settled = true;
             resolve(canvas);
             return;
           }
 
-          cleanup();
+          settled = true;
           resolve(img as any);
         } catch (err) {
-          cleanup();
+          settled = true;
           reject(err);
         }
       };
 
-      img.onerror = () => {
-        // Fallback gracefully in simulated test environments where SVG image rendering is mocked
-        try {
-          const fallbackCanvas =
-            typeof OffscreenCanvas !== "undefined"
-              ? new OffscreenCanvas(width, height)
-              : typeof document !== "undefined"
-                ? document.createElement("canvas")
-                : null;
-          if (fallbackCanvas) {
-            fallbackCanvas.width = width;
-            fallbackCanvas.height = height;
-            cleanup();
-            resolve(fallbackCanvas);
-            return;
-          }
-        } catch {}
-        cleanup();
-        reject(new Error("[open-glass] Failed to rasterize DOM element to image"));
+      img.onerror = (event) => {
+        // A real rejection, not a blank canvas.
+        //
+        // This path used to resolve a freshly constructed OffscreenCanvas that had never been drawn
+        // into. It is truthy, so the provider uploaded an all-zero texture and flipped
+        // `hasBackgroundSource` true: the composite ran over nothing, every panel dropped its CSS blur
+        // and the glass became a flat block, with no failure recorded anywhere. Rejecting instead feeds
+        // the failure counter, the exponential backoff, the `onError` callback and the circuit breaker
+        // in `capture()` — all of which already exist — and leaves readiness false.
+        settled = true;
+        reject(
+          new Error(
+            "[open-glass] Failed to rasterize the DOM subtree to an image. The SVG " +
+              "foreignObject raster did not load, so there is no backdrop to refract.",
+            { cause: event },
+          ),
+        );
       };
 
-      try {
-        const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-        if (typeof URL !== "undefined" && URL.createObjectURL) {
-          blobUrl = URL.createObjectURL(blob);
-          img.src = blobUrl;
-        } else {
-          img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-        }
-      } catch {
-        img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-      }
+      // Always a `data:` URL — never `URL.createObjectURL`. Chrome taints a 2D canvas that a
+      // `blob:`-URL SVG image has been drawn into, and uploading a tainted canvas then throws
+      // `SecurityError: Tainted canvases may not be loaded.` from `texImage2D`. That kills the whole
+      // GPU path while the capture itself looks perfectly healthy — `img.onload` fires, `drawImage`
+      // succeeds, and only the upload fails. A `data:` URL is same-origin, so the canvas stays clean:
+      // `getImageData` works and the raster uploads as a texture. `createImageBitmap(blob)` is not an
+      // escape route either; Chrome cannot decode SVG that way (`InvalidStateError`).
+      //
+      // The cost is size: `encodeURIComponent` inflates the payload for a large subtree. That is a
+      // performance consideration, not a reason to go back to a blob.
+      img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 
       // Guard for JSDOM or headless test environments where image loading events may not trigger
       if (
@@ -345,7 +335,7 @@ export class DomCapturePipeline {
               if (testCanvas) {
                 testCanvas.width = width;
                 testCanvas.height = height;
-                cleanup();
+                settled = true;
                 resolve(testCanvas);
               }
             } catch {}
@@ -401,9 +391,14 @@ export class DomCapturePipeline {
       this.resetFailures();
       return result;
     } catch (err) {
-      // Clearing `dirty` is what stops the loop from re-serializing the whole subtree every frame;
-      // the exponential backoff is what stops it from retrying a permanently broken capture.
-      this.dirty = false;
+      // `dirty` deliberately stays true: a failed attempt captured nothing, so the target is still
+      // unrepresented and the next attempt must be allowed to run. Clearing it here meant the very
+      // first failure was permanent — `capture()` returns early on `!dirty && cachedResult`, and the
+      // provider's own `pipeline.isDirty` gate stopped even calling in — so a transient rasterization
+      // failure at mount left the glass with no backdrop for the lifetime of the page.
+      //
+      // Re-serializing the subtree every frame is prevented by `nextRetryTime` below, and a
+      // permanently broken capture by the `isFailing` circuit breaker; neither needs `dirty` false.
       this.lastCaptureTime = now;
       this.consecutiveFailures += 1;
       this.lastError = err;
