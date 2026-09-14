@@ -244,6 +244,26 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           />
         </div>
 
+        {/* Frosting Saturation */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+            <span>Frosting Saturation</span>
+            <span style={{ fontFamily: "monospace" }}>{optical.saturation.toFixed(2)}</span>
+          </div>
+          <input
+            type="range"
+            min="1.0"
+            max="2.5"
+            step="0.05"
+            value={optical.saturation}
+            onChange={(e) => update("saturation", Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ fontSize: "0.6875rem", color: "#888", marginTop: "2px" }}>
+            1.00 Neutral · 1.80 CSS saturate(180%)
+          </div>
+        </div>
+
         {/* Tint Opacity */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>

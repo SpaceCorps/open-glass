@@ -22,6 +22,14 @@
 //! [`no_backdrop_means_a_transparent_canvas`] asserts a renderer that was never handed a backdrop
 //! draws nothing at all rather than a grey block.
 //!
+//! Nor is tracking the backdrop enough. Those per-quadrant checks compare channels against each other
+//! (`red[0] > red[1]`), and an *ordering* survives any amount of chroma flattening — so a composite
+//! that washed a magenta page to near-neutral grey passed them green while looking markedly worse than
+//! the CSS `backdrop-filter` it replaced. Two assertions close that: a chroma floor inside
+//! [`the_panel_refracts_the_backdrop_beneath_it`], and [`the_saturation_term_reaches_the_composite`],
+//! which renders the same frame at `saturation: 1.0` and at the 1.8 default and requires the measured
+//! chroma to grow.
+//!
 //! The whole file is `cfg`'d to `wasm32`, so a host `cargo test --workspace` compiles it to nothing
 //! and reports zero tests for this target rather than failing to build.
 
@@ -70,13 +78,39 @@ fn create_canvas(width: u32, height: u32) -> HtmlCanvasElement {
     canvas
 }
 
-/// A backdrop with four distinct solid quadrants, in DOM orientation: row 0 is the *top*.
+/// Saturated primaries: red / green on top, blue / black underneath, in DOM orientation.
 ///
-/// Red / green on top, blue / black underneath. The colours are chosen so a single channel comparison
-/// identifies each quadrant even after the blur chain has mixed neighbours into it, and so the
-/// composite's uniform additions (a 12% mix toward the tint colour plus a constant specular term)
-/// cannot change the ordering.
+/// The colours are chosen so a single channel comparison identifies each quadrant even after the blur
+/// chain has mixed neighbours into it, and so the composite's uniform additions (a 12% mix toward the
+/// tint colour plus a constant specular term) cannot change the ordering.
+const PRIMARY_QUADRANTS: [&str; 4] = [
+    "rgb(255, 0, 0)",
+    "rgb(0, 255, 0)",
+    "rgb(0, 0, 255)",
+    "rgb(0, 0, 0)",
+];
+
+/// The same layout in muted mid-tones, for [`the_saturation_term_reaches_the_composite`].
+///
+/// [`PRIMARY_QUADRANTS`] cannot measure a chroma *boost*: `rgb(255, 0, 0)` already sits at the edge of
+/// the gamut, so `u_saturation`'s `clamp` swallows almost all of the increase (measured: a channel
+/// spread of 218 at saturation 1.0 against 251 at 1.8, a ratio of 1.15 for a 1.8x scale). These
+/// mid-tones leave headroom on both sides of the luma, which is also the regime the real defect lives
+/// in — the playground's magenta heading, not a saturated primary.
+const MUTED_QUADRANTS: [&str; 4] = [
+    "rgb(176, 96, 160)",
+    "rgb(96, 176, 128)",
+    "rgb(96, 128, 176)",
+    "rgb(64, 64, 64)",
+];
+
+/// A backdrop with four distinct solid quadrants, in DOM orientation: row 0 is the *top*.
 fn backdrop_canvas() -> HtmlCanvasElement {
+    quadrant_canvas(PRIMARY_QUADRANTS)
+}
+
+/// [`backdrop_canvas`] with the quadrant colours given, clockwise from the DOM top-left.
+fn quadrant_canvas(colors: [&str; 4]) -> HtmlCanvasElement {
     let canvas = create_canvas(WIDTH, HEIGHT);
     let ctx = canvas
         .get_context("2d")
@@ -88,10 +122,10 @@ fn backdrop_canvas() -> HtmlCanvasElement {
     let half_w = f64::from(WIDTH) / 2.0;
     let half_h = f64::from(HEIGHT) / 2.0;
     for (color, x, y) in [
-        ("rgb(255, 0, 0)", 0.0, 0.0),
-        ("rgb(0, 255, 0)", half_w, 0.0),
-        ("rgb(0, 0, 255)", 0.0, half_h),
-        ("rgb(0, 0, 0)", half_w, half_h),
+        (colors[0], 0.0, 0.0),
+        (colors[1], half_w, 0.0),
+        (colors[2], 0.0, half_h),
+        (colors[3], half_w, half_h),
     ] {
         ctx.set_fill_style_str(color);
         ctx.fill_rect(x, y, half_w, half_h);
@@ -103,6 +137,11 @@ fn backdrop_canvas() -> HtmlCanvasElement {
 /// A quad inset from every canvas edge, so all four backdrop quadrants sit under the panel interior
 /// while the SDF edge falloff stays well away from the sampled points.
 fn inset_quad() -> GlassQuad {
+    inset_quad_with(OpticalParams::default())
+}
+
+/// [`inset_quad`] with the optical parameters replaced, for differential tests.
+fn inset_quad_with(optical: OpticalParams) -> GlassQuad {
     GlassQuad {
         x: 32.0,
         y: 32.0,
@@ -110,8 +149,40 @@ fn inset_quad() -> GlassQuad {
         height: HEIGHT as f32 - 64.0,
         corner_radius: 24.0,
         _padding: [0.0; 3],
-        optical: OpticalParams::default(),
+        optical,
     }
+}
+
+/// Chroma of one sample: how far apart its brightest and dimmest channels are.
+///
+/// This is the quantity the saturation term exists to defend. It is also what the per-quadrant
+/// channel-dominance assertions below cannot see: an ordering (`red[0] > red[1]`) survives any amount
+/// of chroma flattening, so a composite that washed the whole panel to near-neutral grey kept them
+/// green.
+fn channel_spread(pixel: [u8; 4]) -> u32 {
+    let max = pixel[0].max(pixel[1]).max(pixel[2]);
+    let min = pixel[0].min(pixel[1]).min(pixel[2]);
+    u32::from(max) - u32::from(min)
+}
+
+/// Render the backdrop with one inset quad at these optical parameters and read the frame back.
+///
+/// Uses [`MUTED_QUADRANTS`], not [`backdrop_canvas`]'s primaries: this feeds
+/// [`the_saturation_term_reaches_the_composite`], and a primary already sits at the gamut edge, so
+/// `u_saturation`'s clamp swallows almost all of a boost (measured: spread 218 at saturation 1.0
+/// against 251 at 1.8, a 1.15x ratio for a 1.8x scale — not the 1.3x floor this test needs).
+fn render_backdrop_with(optical: OpticalParams) -> Vec<u8> {
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let mut renderer =
+        WebGl2Renderer::new(&canvas, WIDTH, HEIGHT).expect("WebGl2Renderer::new failed");
+    renderer
+        .set_background_from_canvas(&quadrant_canvas(MUTED_QUADRANTS))
+        .expect("uploading the backdrop failed");
+    renderer
+        .update_quads(&[inset_quad_with(optical)])
+        .expect("update_quads failed");
+    renderer.render().expect("render failed");
+    read_canvas(&request_context(&canvas))
 }
 
 /// Read the whole default framebuffer back as RGBA bytes.
@@ -260,6 +331,20 @@ fn the_panel_refracts_the_backdrop_beneath_it() {
         "the DOM top-left quadrant is red but sampled as {red:?}; either the backdrop is not reaching \
          the composite or the Y orientation is inverted"
     );
+
+    // Chroma floor. The dominance assertions either side of this one survive any amount of
+    // desaturation, which is how a composite that washed the panel to near-neutral grey passed them.
+    // The source quadrant is `rgb(255, 0, 0)` — a spread of 255 — and no blur can preserve that, so the
+    // floor is set from measurement rather than from the source: the finished shader reads 92 here, and
+    // 72 is a round ~80% of that. Dropping the saturation term takes this to 46.
+    const RED_QUADRANT_CHROMA_FLOOR: u32 = 72;
+    let red_spread = channel_spread(red);
+    assert!(
+        red_spread >= RED_QUADRANT_CHROMA_FLOOR,
+        "the composited red quadrant's channel spread is {red_spread} ({red:?}), below the \
+         {RED_QUADRANT_CHROMA_FLOOR} floor; the panel is washing the backdrop's colour out (the \
+         source quadrant's own spread is 255)"
+    );
     assert!(
         green[1] > green[0] && green[1] > green[2],
         "the DOM top-right quadrant is green but sampled as {green:?}"
@@ -300,6 +385,49 @@ fn the_panel_refracts_the_backdrop_beneath_it() {
              (min {min:?}, max {max:?}); the panel is effectively a flat block"
         );
     }
+}
+
+/// The `saturation` field must actually reach `glass_composite.frag`'s `u_saturation`.
+///
+/// Differential rather than absolute, so it cannot pass vacuously and needs no magic number: the same
+/// backdrop and quad are rendered twice, once at `saturation: 1.0` (the neutral pass-through) and once
+/// at the 1.8 default, and the composited chroma has to grow. It fails if the uniform location is never
+/// resolved, if it is never uploaded per quad, if the TS-to-Rust `add_quad` argument order swaps
+/// saturation for a tint channel, or if a future edit drops the `mix` from the shader — none of which
+/// the absolute floor in [`the_panel_refracts_the_backdrop_beneath_it`] would distinguish from a driver
+/// difference.
+#[wasm_bindgen_test]
+fn the_saturation_term_reaches_the_composite() {
+    let neutral = render_backdrop_with(OpticalParams {
+        saturation: 1.0,
+        ..OpticalParams::default()
+    });
+    let boosted = render_backdrop_with(OpticalParams::default());
+
+    let (qx, qy) = (WIDTH / 4, HEIGHT / 4);
+    let neutral_red = dom_pixel(&neutral, qx, qy);
+    let boosted_red = dom_pixel(&boosted, qx, qy);
+
+    let neutral_spread = channel_spread(neutral_red);
+    let boosted_spread = channel_spread(boosted_red);
+
+    assert!(
+        neutral_spread > 0,
+        "the neutral-saturation pass read {neutral_red:?}, a perfectly grey pixel — the backdrop is \
+         not reaching the composite at all, so this test would compare two zeros"
+    );
+    assert!(
+        f64::from(boosted_spread) >= f64::from(neutral_spread) * 1.3,
+        "saturation 1.8 gave a channel spread of {boosted_spread} ({boosted_red:?}) against \
+         {neutral_spread} at saturation 1.0 ({neutral_red:?}); the default is 1.8, so u_saturation is \
+         either not uploaded or not applied"
+    );
+    assert!(
+        OpticalParams::default().saturation > 1.0,
+        "this test assumes the default boosts chroma; a default of \
+         {} makes it vacuous",
+        OpticalParams::default().saturation
+    );
 }
 
 /// A renderer that was never handed a backdrop must draw nothing.

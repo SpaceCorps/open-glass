@@ -58,6 +58,7 @@ struct CompositeUniforms {
     sheen_intensity: Option<WebGlUniformLocation>,
     light_angle: Option<WebGlUniformLocation>,
     roughness: Option<WebGlUniformLocation>,
+    saturation: Option<WebGlUniformLocation>,
     tint_color: Option<WebGlUniformLocation>,
 }
 
@@ -296,6 +297,7 @@ impl WebGl2Renderer {
             sheen_intensity: gl.get_uniform_location(&composite_program, "u_sheen_intensity"),
             light_angle: gl.get_uniform_location(&composite_program, "u_light_angle"),
             roughness: gl.get_uniform_location(&composite_program, "u_roughness"),
+            saturation: gl.get_uniform_location(&composite_program, "u_saturation"),
             tint_color: gl.get_uniform_location(&composite_program, "u_tint_color"),
         };
 
@@ -419,14 +421,23 @@ impl WebGl2Renderer {
     }
 
     /// Blur the backdrop down and back up through the mip chain, leaving the result in level 0.
+    ///
+    /// The chain is *allocated* at [`MIP_LEVELS`] but only traversed as deep as this radius asks for
+    /// ([`physics::kawase_levels_for_radius`]): each halving contributes a fixed ~15px of sigma that
+    /// `blur_radius` cannot modulate, so walking all five levels for a 2px radius produced a blur an
+    /// order of magnitude wider than the slider said. The level count is floored at 1, so level 0 —
+    /// the only level [`Self::run_composite_pass`] samples — is always written.
     fn run_blur_passes(&self, blur_radius: f32) {
         let gl = &self.gl;
         gl.use_program(Some(&self.blur_program));
         gl.uniform1i(self.blur_uniforms.texture.as_ref(), 0);
         gl.active_texture(Gl::TEXTURE0);
 
+        let levels = (physics::kawase_levels_for_radius(blur_radius, MIP_LEVELS as u32) as usize)
+            .min(self.mip_chain.len());
+
         // Downsample: level 0 samples the backdrop, level n samples level n-1.
-        for level in 0..self.mip_chain.len() {
+        for level in 0..levels {
             let source_texture = if level == 0 {
                 &self.background_texture
             } else {
@@ -440,7 +451,7 @@ impl WebGl2Renderer {
         }
 
         // Upsample: walk the same levels back towards level 0 with the half-step kernel.
-        for level in (0..self.mip_chain.len().saturating_sub(1)).rev() {
+        for level in (0..levels.saturating_sub(1)).rev() {
             let source = &self.mip_chain[level + 1];
             self.draw_blur_pass(
                 &self.mip_chain[level],
@@ -518,6 +529,7 @@ impl WebGl2Renderer {
             );
             gl.uniform1f(uniforms.light_angle.as_ref(), quad.optical.light_angle);
             gl.uniform1f(uniforms.roughness.as_ref(), quad.optical.roughness);
+            gl.uniform1f(uniforms.saturation.as_ref(), quad.optical.saturation);
             let tint = quad.optical.tint_color;
             gl.uniform4f(
                 uniforms.tint_color.as_ref(),
@@ -676,6 +688,7 @@ mod tests {
             "u_sheen_intensity",
             "u_light_angle",
             "u_roughness",
+            "u_saturation",
             "u_tint_color",
         ] {
             assert!(
@@ -683,6 +696,23 @@ mod tests {
                 "glass_composite.frag is missing {uniform}, which the renderer caches a location for"
             );
         }
+    }
+
+    #[test]
+    fn test_blur_depth_tracks_the_blur_radius() {
+        // `run_blur_passes` traverses this many of the allocated MIP_LEVELS. A small radius must not
+        // pay the full pyramid's fixed sigma; a large one must use the whole chain.
+        let shallow = physics::kawase_levels_for_radius(2.0, MIP_LEVELS as u32);
+        assert!(
+            shallow >= 1 && (shallow as usize) < MIP_LEVELS,
+            "a 2px radius traverses {shallow} of {MIP_LEVELS} levels"
+        );
+        assert_eq!(
+            physics::kawase_levels_for_radius(32.0, MIP_LEVELS as u32) as usize,
+            MIP_LEVELS
+        );
+        // The composite pass only ever samples level 0, so it must always be written.
+        assert!(physics::kawase_levels_for_radius(0.0, MIP_LEVELS as u32) >= 1);
     }
 
     #[test]

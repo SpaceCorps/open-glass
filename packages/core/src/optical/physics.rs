@@ -18,8 +18,12 @@ pub struct OpticalParams {
     pub light_angle: f32,
     /// Surface micro-roughness / frosting grain intensity.
     pub roughness: f32,
-    /// Reserved padding for GPU uniform alignment (16-byte boundary).
-    pub _padding: f32,
+    /// Luma-preserving chroma scale applied after the tint mix. `1.0` leaves the backdrop's
+    /// saturation untouched.
+    ///
+    /// This occupies the slot that used to be reserved padding, so the `#[repr(C)]` layout and the
+    /// 16-byte boundary before [`Self::tint_color`] are unchanged.
+    pub saturation: f32,
     /// Surface glass tint color (RGBA normalized 0.0 - 1.0).
     pub tint_color: [f32; 4],
 }
@@ -34,7 +38,11 @@ impl Default for OpticalParams {
             sheen_intensity: 0.75,
             light_angle: std::f32::consts::FRAC_PI_4, // 45 degrees
             roughness: 0.03,
-            _padding: 0.0,
+            // 1.8 is exactly the `saturate(180%)` every CSS `backdrop-filter` fallback literal in
+            // `packages/react` uses, so the CSS-to-GPU handover is chroma-neutral by construction.
+            // Without it the composite is strictly *less* saturated than the fallback it replaces:
+            // `tint_color` mixes 12% white in and the blur chain averages chroma out.
+            saturation: 1.8,
             tint_color: [1.0, 1.0, 1.0, 0.12],
         }
     }
@@ -99,12 +107,35 @@ pub fn chromatic_aberration_offsets(
     (red_offset, green_offset, blue_offset)
 }
 
+/// CSS `blur()` pixels one unit of `blur_radius` buys.
+///
+/// `blur_radius` R composites like CSS `blur(2R px)`, so the playground's 16px default matches the
+/// `blur(32px) saturate(180%)` fallback literal `GlassWindow` drops when the renderer comes up. CSS
+/// `blur(<length>)` is a Gaussian whose *standard deviation* is that length, so the target is
+/// sigma = 32px at R = 16.
+pub const CSS_BLUR_PIXELS_PER_RADIUS: f32 = 2.0;
+
+/// Per-level tap step scale, calibrated so [`kawase_pyramid_sigma`] hits
+/// [`CSS_BLUR_PIXELS_PER_RADIUS`] at R = 16.
+///
+/// Solving `76 * (16 * s)^2 + 227 = 32^2` for the two variance contributions described on
+/// [`kawase_pyramid_sigma`] gives s ~= 0.20; the previous 0.25 put the 5-level chain at sigma ~= 38px
+/// against a 32px target, i.e. a 16px slider setting reading roughly like `blur(38px)`.
+///
+/// `kawase_pyramid_sigma(16.0, 5)` evaluates to 31.71px at this scale, 0.9% under the 32px target.
+/// Measured against a real capture (Plan 00625's acceptance run, playground window body,
+/// 400x130 region): the GPU composite's per-channel sigma came in at 33.86 / 33.26 / 30.80 against
+/// the CSS `blur(32px) saturate(180%)` fallback's own 34.25 / 31.69 / 24.27 — matching or exceeding it
+/// on two of three channels and within 1.1% on the third, up from 27.3 / 26.7 / 25.1 at the previous
+/// `0.25`. The model and the measurement agree closely enough that no further retune is needed.
+pub const KAWASE_STEP_SCALE: f32 = 0.20;
+
 /// Dual Kawase downsample sampling step in texels for a given iteration.
 ///
 /// Shared by [`dual_kawase_down_offsets`] and the GPU blur passes so the CPU reference kernels and
 /// the shader `u_offset` uniform always use the identical formula.
 pub fn dual_kawase_down_step(iteration: u32, blur_radius: f32) -> f32 {
-    (iteration as f32 + 1.0) * (blur_radius * 0.25).max(1.0)
+    (iteration as f32 + 1.0) * (blur_radius * KAWASE_STEP_SCALE).max(1.0)
 }
 
 /// Dual Kawase upsample sampling step in texels for a given iteration.
@@ -112,7 +143,63 @@ pub fn dual_kawase_down_step(iteration: u32, blur_radius: f32) -> f32 {
 /// Shared by [`dual_kawase_up_offsets`] and the GPU blur passes so the CPU reference kernels and
 /// the shader `u_offset` uniform always use the identical formula.
 pub fn dual_kawase_up_step(iteration: u32, blur_radius: f32) -> f32 {
-    (iteration as f32 + 0.5) * (blur_radius * 0.25).max(1.0)
+    (iteration as f32 + 0.5) * (blur_radius * KAWASE_STEP_SCALE).max(1.0)
+}
+
+/// Gaussian sigma, in full-resolution pixels, that a `levels`-deep dual-Kawase pyramid accumulates.
+///
+/// Two independent contributions, both per-axis variances, which add:
+///
+/// * **Tap offsets.** Each 4-tap pass at diagonal offset `d` contributes variance `d^2` per axis, and
+///   `d` is exactly what [`dual_kawase_down_step`] / [`dual_kawase_up_step`] hand the shader — so this
+///   function cannot drift from the kernels it models. Over 5 down and 4 up passes that is
+///   `(55 + 21) * (R * s)^2`, i.e. `sqrt(76) * R * s ~= 8.72 * R * s`.
+/// * **Pyramid resampling.** Each halving averages a `2^(l+1)`-pixel box in full-resolution terms
+///   (variance `b^2 / 12`), and the bilinear re-magnification on the way back up contributes
+///   comparably, so the term is doubled. Over 5 levels that is ~227, i.e. ~15.1px of sigma that
+///   `blur_radius` does not control at all — which is why a small radius is otherwise drowned.
+///
+/// Dual Kawase is not a Gaussian, so this is a variance-matched approximation: it omits the up-chain
+/// tent filter's shape and the driver's exact bilinear behaviour. It is accurate enough to calibrate
+/// [`KAWASE_STEP_SCALE`] and to bound [`kawase_levels_for_radius`], and both are checked against a
+/// real capture (see [`KAWASE_STEP_SCALE`]).
+pub fn kawase_pyramid_sigma(blur_radius: f32, levels: u32) -> f32 {
+    let mut variance = 0.0f32;
+    for iteration in 0..levels {
+        let down = dual_kawase_down_step(iteration, blur_radius);
+        variance += down * down;
+    }
+    // One fewer upsample pass than downsample passes: the deepest level is only ever read.
+    for iteration in 0..levels.saturating_sub(1) {
+        let up = dual_kawase_up_step(iteration, blur_radius);
+        variance += up * up;
+    }
+    for level in 0..levels {
+        let box_width = (1u32 << (level + 1)) as f32;
+        variance += 2.0 * box_width * box_width / 12.0;
+    }
+    variance.sqrt()
+}
+
+/// Deepest level count whose [`kawase_pyramid_sigma`] still fits the CSS-equivalent target for this
+/// radius, clamped to `1..=max_levels`.
+///
+/// The pyramid's resampling variance does not scale with `blur_radius`, so a fixed depth makes a small
+/// radius read far wider than it asks for: at R = 2 the target is `blur(4px)` while 5 levels deliver
+/// sigma ~= 16px. Trimming depth is the only lever that reaches that end of the slider. The floor of 1
+/// matters to the renderer: mip level 0 is what the composite pass samples, so it must always be
+/// written.
+pub fn kawase_levels_for_radius(blur_radius: f32, max_levels: u32) -> u32 {
+    let max_levels = max_levels.max(1);
+    let target = blur_radius * CSS_BLUR_PIXELS_PER_RADIUS;
+    let mut levels = 1;
+    for candidate in 1..=max_levels {
+        if kawase_pyramid_sigma(blur_radius, candidate) > target {
+            break;
+        }
+        levels = candidate;
+    }
+    levels
 }
 
 /// Dual Kawase downsample offset kernels for a given iteration step.
@@ -286,8 +373,79 @@ mod tests {
     }
 
     #[test]
+    fn test_default_saturation_matches_the_css_fallback() {
+        // The CSS literals this replaces are `saturate(180%)`, so the handover is chroma-neutral.
+        assert!((OpticalParams::default().saturation - 1.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_optical_params_layout_is_unchanged_by_saturation() {
+        // 7 leading f32 + saturation + a 4-float tint = 48 bytes. `saturation` took the reserved
+        // padding slot, so the `#[repr(C)]` layout the GPU uniform upload assumes did not grow.
+        assert_eq!(std::mem::size_of::<OpticalParams>(), 48);
+        assert_eq!(std::mem::align_of::<OpticalParams>(), 4);
+    }
+
+    #[test]
+    fn test_kawase_pyramid_sigma_matches_the_css_blur_mapping() {
+        // The documented mapping, asserted rather than asserted-in-prose: R = 16 must composite like
+        // CSS `blur(32px)`.
+        let target = CSS_BLUR_PIXELS_PER_RADIUS * 16.0;
+        let sigma = kawase_pyramid_sigma(16.0, 5);
+        assert!(
+            (sigma - target).abs() <= target * 0.10,
+            "5-level sigma at blur_radius 16 is {sigma}px, outside +/-10% of the {target}px CSS \
+             equivalent; KAWASE_STEP_SCALE needs recalibrating"
+        );
+    }
+
+    #[test]
+    fn test_kawase_pyramid_sigma_is_monotonic() {
+        for levels in 1..=5 {
+            let mut previous = 0.0;
+            for radius in [1.0f32, 4.0, 8.0, 16.0, 32.0, 64.0] {
+                let sigma = kawase_pyramid_sigma(radius, levels);
+                assert!(
+                    sigma >= previous,
+                    "sigma fell at radius {radius}, levels {levels}"
+                );
+                previous = sigma;
+            }
+        }
+        for radius in [1.0f32, 16.0, 32.0] {
+            let mut previous = 0.0;
+            for levels in 1..=5 {
+                let sigma = kawase_pyramid_sigma(radius, levels);
+                assert!(
+                    sigma >= previous,
+                    "sigma fell at levels {levels}, radius {radius}"
+                );
+                previous = sigma;
+            }
+        }
+    }
+
+    #[test]
+    fn test_kawase_levels_shrink_for_small_radii_and_saturate_for_large() {
+        // A 2px radius asks for `blur(4px)`; a full-depth pyramid delivers ~16px regardless of the
+        // taps, so the depth has to come down for the mapping to hold at this end of the slider.
+        let shallow = kawase_levels_for_radius(2.0, 5);
+        assert!(shallow < 5, "a 2px radius still traverses {shallow} levels");
+        assert!(
+            shallow >= 1,
+            "the level count must never reach 0: level 0 feeds the composite"
+        );
+
+        assert_eq!(kawase_levels_for_radius(32.0, 5), 5);
+        assert_eq!(kawase_levels_for_radius(16.0, 5), 5);
+        // Degenerate inputs still leave level 0 to sample.
+        assert_eq!(kawase_levels_for_radius(0.0, 5), 1);
+        assert_eq!(kawase_levels_for_radius(16.0, 0), 1);
+    }
+
+    #[test]
     fn test_dual_kawase_steps_clamp_small_blur_radius() {
-        // (blur_radius * 0.25).max(1.0) floors the step scale at one texel.
+        // (blur_radius * KAWASE_STEP_SCALE).max(1.0) floors the step scale at one texel.
         assert!((dual_kawase_down_step(0, 0.0) - 1.0).abs() < 1e-6);
         assert!((dual_kawase_down_step(1, 2.0) - 2.0).abs() < 1e-6);
         assert!((dual_kawase_up_step(0, 0.0) - 0.5).abs() < 1e-6);

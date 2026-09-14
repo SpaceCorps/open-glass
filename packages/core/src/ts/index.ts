@@ -62,6 +62,9 @@ export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   sheenIntensity: 0.75,
   lightAngle: Math.PI / 4,
   roughness: 0.03,
+  // The `saturate(180%)` every CSS fallback literal uses, so the handover to the GPU composite does
+  // not visibly drain the colour out of the backdrop.
+  saturation: 1.8,
   tintColor: [1.0, 1.0, 1.0, 0.12],
 };
 
@@ -276,6 +279,11 @@ class GlassEngineImpl implements GlassEngine {
         this.wasmEngine.clear_quads();
         for (const quad of quads) {
           const optical = { ...DEFAULT_OPTICAL_PARAMS, ...quad.optical };
+          // Positional, and the order must mirror `OpticalParams`' field order in
+          // `packages/core/src/optical/physics.rs`. A swap here is silent — it would feed the
+          // saturation into a tint channel — so `packages/core/tests/webgl2_browser.rs`'s
+          // `the_saturation_term_reaches_the_composite` and `engine.test.ts`' argument-order
+          // assertion both pin it.
           this.wasmEngine.add_quad(
             quad.x,
             quad.y,
@@ -289,6 +297,7 @@ class GlassEngineImpl implements GlassEngine {
             optical.sheenIntensity,
             optical.lightAngle,
             optical.roughness,
+            optical.saturation,
             optical.tintColor[0],
             optical.tintColor[1],
             optical.tintColor[2],
