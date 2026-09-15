@@ -133,9 +133,11 @@ describe("packages/core engine negotiation", () => {
       expect(engine.isRenderReady?.() ?? false).toBe(true);
 
       // `add_quad` is positional and must mirror `OpticalParams`' Rust field order, with `saturation`
-      // between `roughness` and the four tint channels. A swap would feed the chroma boost into a tint
-      // channel and `updateQuads` swallows every throw from this call, so nothing else here would
-      // notice; the browser test's chroma differential is the other half of this guard.
+      // then `brightness` between `roughness` and the four tint channels. A swap would feed the chroma
+      // boost or the exposure gain into a tint channel and `updateQuads` swallows every throw from this
+      // call, so nothing else here would notice; the browser tests' chroma and luma differentials are
+      // the other half of this guard. Both overrides are deliberately values no tint channel holds
+      // (1.0, 1.0, 1.0, 0.12), so any adjacent transposition changes this array.
       engine.updateQuads([
         {
           id: "panel",
@@ -144,7 +146,7 @@ describe("packages/core engine negotiation", () => {
           width: 100,
           height: 50,
           cornerRadius: 12,
-          optical: { saturation: 1.42 },
+          optical: { saturation: 1.42, brightness: 1.17 },
         },
       ]);
       expect(quadArgs).toHaveLength(1);
@@ -162,6 +164,7 @@ describe("packages/core engine negotiation", () => {
         DEFAULT_OPTICAL_PARAMS.lightAngle,
         DEFAULT_OPTICAL_PARAMS.roughness,
         1.42,
+        1.17,
         ...DEFAULT_OPTICAL_PARAMS.tintColor,
       ]);
 
