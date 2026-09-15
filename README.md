@@ -132,6 +132,7 @@ cargo test --workspace
 # Lint and format checks
 vp check
 cargo clippy --workspace -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ## Contributing
