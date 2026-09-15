@@ -10,9 +10,10 @@ import {
 } from "@open-glass/react";
 import { ControlsPanel } from "./components/ControlsPanel";
 import { DesktopDemo } from "./demos/DesktopDemo";
+import { FormsDemo } from "./demos/FormsDemo";
 import { VisionOSDemo } from "./demos/VisionOSDemo";
 
-type ShowcaseView = "desktop" | "visionos" | "components";
+type ShowcaseView = "desktop" | "visionos" | "components" | "forms";
 
 export const App: React.FC = () => {
   const [view, setView] = useState<ShowcaseView>("desktop");
@@ -63,7 +64,7 @@ export const App: React.FC = () => {
               border: "1px solid rgba(255,255,255,0.1)",
             }}
           >
-            {(["desktop", "visionos", "components"] as const).map((v) => (
+            {(["desktop", "visionos", "components", "forms"] as const).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -84,7 +85,9 @@ export const App: React.FC = () => {
                   ? "macOS Desktop"
                   : v === "visionos"
                     ? "visionOS Spatial"
-                    : "Component Catalog"}
+                    : v === "components"
+                      ? "Component Catalog"
+                      : "Form Controls"}
               </button>
             ))}
           </div>
@@ -96,6 +99,7 @@ export const App: React.FC = () => {
           <main style={{ flex: 1, minWidth: 0 }}>
             {view === "desktop" && <DesktopDemo optical={optical} />}
             {view === "visionos" && <VisionOSDemo optical={optical} />}
+            {view === "forms" && <FormsDemo optical={optical} />}
             {view === "components" && (
               <div
                 style={{
