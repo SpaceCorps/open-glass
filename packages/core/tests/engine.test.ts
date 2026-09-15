@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
+  AUTO_BACKDROP_DEPTH,
   createGlassEngine,
   DEFAULT_OPTICAL_PARAMS,
   negotiateBackend,
@@ -69,14 +70,21 @@ describe("packages/core engine negotiation", () => {
     vi.resetModules();
 
     const uploads: unknown[] = [];
+    const bandCalls: unknown[][] = [];
+    const released: number[] = [];
     const quadArgs: number[][] = [];
     class FakeWasmEngine {
       constructor(..._args: unknown[]) {}
-      set_background_from_canvas(source: unknown) {
+      set_band_from_canvas(band: number, source: unknown, depth: number) {
+        bandCalls.push([band, source, depth]);
         uploads.push(source);
       }
-      set_background_from_offscreen_canvas(source: unknown) {
+      set_band_from_offscreen_canvas(band: number, source: unknown, depth: number) {
+        bandCalls.push([band, source, depth]);
         uploads.push(source);
+      }
+      release_bands_from(first: number) {
+        released.push(first);
       }
       has_real_background() {
         return uploads.length > 0;
@@ -96,6 +104,7 @@ describe("packages/core engine negotiation", () => {
       default: () => Promise.resolve({}),
       init_panic_hook: () => {},
       calculate_fresnel: () => 0,
+      max_backdrop_bands: () => 3,
       RendererBackend: { Auto: 0, WebGpu: 1, WebGl2: 2 },
       WasmGlassEngine: FakeWasmEngine,
     }));
@@ -128,6 +137,23 @@ describe("packages/core engine negotiation", () => {
       engine.updateBackgroundSource(source);
 
       expect(uploads).toEqual([source]);
+      // The single-source API is band 0 at the calibrated depth, plus a release of everything nearer:
+      // a caller coming back to it from the banded API must not keep a stale near band refracting over
+      // its new backdrop. `set_band_from_canvas` is positional, so the argument order is part of the
+      // contract — a swapped band and depth would upload band -1 at depth 0 and be rejected silently.
+      expect(bandCalls).toEqual([[0, source, AUTO_BACKDROP_DEPTH]]);
+      expect(released).toEqual([1]);
+
+      // An explicit band and distance reach Rust unchanged.
+      const nearRaster = new StubCanvas() as unknown as HTMLCanvasElement;
+      engine.updateBackdropBand(1, nearRaster, 480);
+      expect(bandCalls[1]).toEqual([1, nearRaster, 480]);
+
+      // And releasing from band 0 — every content layer gone — reaches the renderer, so nothing keeps
+      // being sampled.
+      engine.releaseBackdropBandsFrom(0);
+      expect(released).toEqual([1, 0]);
+
       expect(engine.hasBackgroundSource()).toBe(true);
       // A confirmed upload into a live renderer is the whole readiness condition.
       expect(engine.isRenderReady?.() ?? false).toBe(true);
@@ -193,9 +219,10 @@ describe("packages/core engine negotiation", () => {
 
     class RejectingWasmEngine {
       constructor(..._args: unknown[]) {}
-      set_background_from_canvas() {
+      set_band_from_canvas() {
         throw new Error("SecurityError: Tainted canvases may not be loaded.");
       }
+      release_bands_from() {}
       has_real_background() {
         return false;
       }
@@ -208,6 +235,7 @@ describe("packages/core engine negotiation", () => {
       default: () => Promise.resolve({}),
       init_panic_hook: () => {},
       calculate_fresnel: () => 0,
+      max_backdrop_bands: () => 3,
       RendererBackend: { Auto: 0, WebGpu: 1, WebGl2: 2 },
       WasmGlassEngine: RejectingWasmEngine,
     }));
