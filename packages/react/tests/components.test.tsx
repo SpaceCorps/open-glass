@@ -128,6 +128,91 @@ describe("Open Glass React Components", () => {
     fireEvent.pointerLeave(btn);
   });
 
+  it("shows a stacked focus ring on GlassButton on keyboard focus and never sets outline: none", () => {
+    render(
+      <GlassProvider>
+        <GlassButton>Focus Me</GlassButton>
+      </GlassProvider>,
+    );
+    const btn = screen.getByRole("button", { name: "Focus Me" });
+
+    const restingBorder = btn.style.border;
+    const restingBoxShadow = btn.style.boxShadow;
+    // A real focus, so `document.activeElement` is set and the modality is the keyboard's. `act` is
+    // what flushes the resulting render — a bare `focus()` schedules it but does not.
+    act(() => {
+      btn.focus();
+    });
+
+    expect(btn.style.border).not.toBe(restingBorder);
+    expect(btn.style.border).toContain("rgba(160, 205, 255, 0.95)");
+    expect(btn.style.boxShadow).not.toBe(restingBoxShadow);
+    expect(btn.style.boxShadow).toContain("rgba(120, 180, 255, 0.65)");
+    expect(btn.style.outline).not.toBe("none");
+  });
+
+  it("suppresses GlassButton's focus ring when focus arrives from a pointer", () => {
+    render(
+      <GlassProvider>
+        <GlassButton>Focus Me</GlassButton>
+      </GlassProvider>,
+    );
+    const btn = screen.getByRole("button", { name: "Focus Me" });
+
+    const restingBoxShadow = btn.style.boxShadow;
+    // `pointerUp` releases the press state right back to `restingBoxShadow` so the assertion below
+    // isolates the focus ring from the (unrelated) press-scale box-shadow change.
+    fireEvent.pointerDown(btn);
+    fireEvent.pointerUp(btn);
+    act(() => {
+      btn.focus();
+    });
+
+    expect(btn.style.boxShadow).toBe(restingBoxShadow);
+    expect(btn.style.boxShadow).not.toContain("rgba(120, 180, 255, 0.65)");
+  });
+
+  it("clears GlassButton's focus ring on blur", () => {
+    render(
+      <GlassProvider>
+        <GlassButton>Focus Me</GlassButton>
+      </GlassProvider>,
+    );
+    const btn = screen.getByRole("button", { name: "Focus Me" });
+
+    const restingBoxShadow = btn.style.boxShadow;
+    act(() => {
+      btn.focus();
+    });
+    expect(btn.style.boxShadow).not.toBe(restingBoxShadow);
+
+    fireEvent.blur(btn);
+    expect(btn.style.boxShadow).toBe(restingBoxShadow);
+  });
+
+  it("still calls the caller's onFocus, onBlur and onPointerDown handlers on GlassButton", () => {
+    const onFocus = vi.fn();
+    const onBlur = vi.fn();
+    const onPointerDown = vi.fn();
+
+    render(
+      <GlassProvider>
+        <GlassButton onFocus={onFocus} onBlur={onBlur} onPointerDown={onPointerDown}>
+          Focus Me
+        </GlassButton>
+      </GlassProvider>,
+    );
+    const btn = screen.getByRole("button", { name: "Focus Me" });
+
+    fireEvent.pointerDown(btn);
+    fireEvent.focus(btn);
+    fireEvent.blur(btn);
+
+    expect(onPointerDown).toHaveBeenCalledTimes(1);
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(onBlur).toHaveBeenCalledTimes(1);
+  });
+
   it("renders GlassNavbar with header element and content", () => {
     render(
       <GlassProvider>
