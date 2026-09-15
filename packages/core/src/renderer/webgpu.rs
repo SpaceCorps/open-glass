@@ -128,11 +128,29 @@ mod tests {
 
     #[test]
     fn test_wgsl_composite_declares_every_frag_uniform() {
+        // GLSL-only names and why each is allowed to be missing from the WGSL sibling:
+        // - `band_texture_0/1/2`, `band_depth_0/1/2`, `band_count`: the depth-banded backdrop
+        //   (Plan 00676) gave the WebGL2 composite up to three backdrop bands, each with its own
+        //   texture and depth, replacing the single `blurred_texture` this WGSL file still declares.
+        //   The WebGPU backend is not wired up (`WebGpuRenderer::new` deliberately fails), so nothing
+        //   reads this file yet; porting the band accumulation to WGSL is tracked as a follow-up
+        //   (see this plan's "Teach the WebGPU upload path about bands" recommendation) rather than
+        //   done speculatively against an untested backend.
+        const ALLOWLIST: [&str; 7] = [
+            "band_texture_0",
+            "band_texture_1",
+            "band_texture_2",
+            "band_depth_0",
+            "band_depth_1",
+            "band_depth_2",
+            "band_count",
+        ];
+
         let frag_names = frag_uniform_names(COMPOSITE_FRAG);
         assert_eq!(
             frag_names.len(),
-            15,
-            "expected 15 uniforms in glass_composite.frag"
+            21,
+            "expected 21 uniforms in glass_composite.frag"
         );
 
         let mut wgsl_names = wgsl_struct_field_names(COMPOSITE_WGSL);
@@ -140,7 +158,7 @@ mod tests {
 
         let missing: Vec<&String> = frag_names
             .iter()
-            .filter(|n| !wgsl_names.contains(n))
+            .filter(|n| !wgsl_names.contains(n) && !ALLOWLIST.contains(&n.as_str()))
             .collect();
         assert!(
             missing.is_empty(),
@@ -158,7 +176,16 @@ mod tests {
         // - `_padding`: the block's explicit tail to the 96-byte stride WGSL rounds it up to. It
         //   replaced the earlier `padding` / `padding2` pair, whose offsets did not do what their
         //   names suggested — see `super::uniforms::GlassCompositeUniforms`.
-        const ALLOWLIST: [&str; 4] = ["optical", "texture_sampler", "blur_radius", "_padding"];
+        // - `blurred_texture`: the pre-banding single backdrop texture. `glass_composite.frag` split
+        //   this into `band_texture_0/1/2` (Plan 00676); the WGSL sibling still declares the old
+        //   single binding since the WebGPU backend that would consume it does not exist yet.
+        const ALLOWLIST: [&str; 5] = [
+            "optical",
+            "texture_sampler",
+            "blur_radius",
+            "_padding",
+            "blurred_texture",
+        ];
 
         let frag_names = frag_uniform_names(COMPOSITE_FRAG);
         let mut wgsl_names = wgsl_struct_field_names(COMPOSITE_WGSL);

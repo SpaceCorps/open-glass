@@ -1,6 +1,6 @@
 use super::uniforms::GlassCompositeUniforms;
 use super::{GlassQuad, GlassRenderer};
-use crate::optical::physics::{self, OpticalParams};
+use crate::optical::physics;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     HtmlCanvasElement, OffscreenCanvas, WebGl2RenderingContext as Gl, WebGlBuffer,
@@ -34,6 +34,20 @@ const MIP_LEVELS: usize = 5;
 /// Smallest edge length a mip level may shrink to.
 const MIN_MIP_SIZE: u32 = 4;
 
+/// Depth bands the backdrop can be split into: far, mid, near.
+///
+/// Each band costs one full-size raster plus its own [`MIP_LEVELS`]-deep chain, and one DOM
+/// serialization per frame on the capture side, so this is deliberately small. `glass_composite.frag`
+/// declares exactly this many named samplers; the two must agree.
+pub const MAX_BACKDROP_BANDS: usize = 3;
+
+/// Distinct blur radii a single frame will run the blur chain for.
+///
+/// Per-quad radius is honoured by blurring once per group of quads sharing a quantized radius, so this
+/// bounds the pass count: a frame with more distinct radii than this snaps the rarest ones onto the
+/// nearest kept radius rather than paying for another `MAX_BACKDROP_BANDS`-worth of chains.
+const MAX_BLUR_GROUPS: usize = 4;
+
 /// Fullscreen triangle in clip space, two floats per vertex.
 const FULLSCREEN_TRIANGLE: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
 
@@ -49,7 +63,11 @@ struct BlurUniforms {
 
 /// Cached uniform locations for [`COMPOSITE_FRAGMENT_SHADER`].
 struct CompositeUniforms {
-    blurred_texture: Option<WebGlUniformLocation>,
+    /// One location per named band sampler. Named rather than a `sampler2D[3]` because GLSL ES 3.00
+    /// forbids indexing a sampler array with a non-constant expression.
+    band_textures: [Option<WebGlUniformLocation>; MAX_BACKDROP_BANDS],
+    band_depths: [Option<WebGlUniformLocation>; MAX_BACKDROP_BANDS],
+    band_count: Option<WebGlUniformLocation>,
     resolution: Option<WebGlUniformLocation>,
     glass_bounds: Option<WebGlUniformLocation>,
     corner_radius: Option<WebGlUniformLocation>,
@@ -74,6 +92,22 @@ struct MipLevel {
     height: u32,
 }
 
+/// One depth band of the backdrop: the raster a content layer was captured into, its own blur chain,
+/// and how far behind the glass rear face it sits.
+///
+/// Bands are contiguous from 0 and ordered far to near, which is the order the composite walks them in.
+struct BackdropBand {
+    /// The uploaded raster; a 1x1 transparent seed until an upload lands.
+    texture: WebGlTexture,
+    /// This band's own ping-pong chain. Level 0 is the only level the composite samples.
+    mip_chain: Vec<MipLevel>,
+    /// Pixels behind the rear face, or [`physics::AUTO_BACKDROP_DEPTH`] when the caller did not say.
+    depth: f32,
+    /// False until a `set_band_from_*` upload has actually succeeded. The transparent seed deliberately
+    /// does not count: see [`GlassRenderer::has_real_background`].
+    has_content: bool,
+}
+
 /// WebGL2 fallback optical rendering pipeline.
 pub struct WebGl2Renderer {
     gl: Gl,
@@ -86,12 +120,7 @@ pub struct WebGl2Renderer {
     composite_uniforms: CompositeUniforms,
     quad_vao: WebGlVertexArrayObject,
     quad_buffer: WebGlBuffer,
-    background_texture: WebGlTexture,
-    /// False until a `set_background_from_*` upload has actually succeeded. The 1x1 transparent seed
-    /// in [`Self::create_background_texture`] deliberately does not count: see
-    /// [`GlassRenderer::has_real_background`].
-    has_real_background: bool,
-    mip_chain: Vec<MipLevel>,
+    bands: [BackdropBand; MAX_BACKDROP_BANDS],
 }
 
 /// Sizes of the blur mip chain, each level half the previous one and floored at [`MIN_MIP_SIZE`].
@@ -107,17 +136,67 @@ fn mip_chain_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Blur radius driving the shared blurred backdrop.
+/// Partition the submitted quads into groups that can share one run of the blur chain.
 ///
-/// `glass_composite.frag` samples a single `u_blurred_texture`, so every quad shares one blur
-/// strength: the mean of their `blur_radius`, or the [`OpticalParams`] default when no quads have
-/// been submitted yet.
-fn average_blur_radius(quads: &[GlassQuad]) -> f32 {
+/// The chain ping-pongs down and back up into level 0, the only level the composite samples, so one run
+/// yields exactly one radius. Honouring per-quad `blur_radius` therefore means running the chain once
+/// per distinct radius and drawing that radius' quads in between — which the composite pass is split up
+/// to allow.
+///
+/// Radii are quantized to [`physics::BLUR_RADIUS_QUANTUM`] first, so panels that merely differ by a
+/// rounding error still share a pass. Beyond [`MAX_BLUR_GROUPS`] distinct radii the *rarest* ones are
+/// snapped onto the nearest kept radius: dropping the least-used radius costs the fewest panels their
+/// exact blur, and it is what keeps the per-frame pass count bounded no matter how many panels a page
+/// mounts.
+///
+/// Groups come back sorted by ascending radius, each carrying its quads' indices in submission order.
+/// Empty input yields no groups at all — `render()` still clears the canvas.
+fn blur_groups(quads: &[GlassQuad]) -> Vec<(f32, Vec<usize>)> {
     if quads.is_empty() {
-        return OpticalParams::default().blur_radius;
+        return Vec::new();
     }
-    let total: f32 = quads.iter().map(|quad| quad.optical.blur_radius).sum();
-    total / quads.len() as f32
+
+    let radii: Vec<f32> = quads
+        .iter()
+        .map(|quad| physics::quantize_blur_radius(quad.optical.blur_radius))
+        .collect();
+
+    let mut tally: Vec<(f32, usize)> = Vec::new();
+    for &radius in &radii {
+        match tally.iter_mut().find(|(value, _)| *value == radius) {
+            Some((_, count)) => *count += 1,
+            None => tally.push((radius, 1)),
+        }
+    }
+
+    // Most common first, ties broken by ascending radius so the choice is deterministic.
+    tally.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.total_cmp(&b.0)));
+    let mut kept: Vec<f32> = tally
+        .into_iter()
+        .take(MAX_BLUR_GROUPS)
+        .map(|(radius, _)| radius)
+        .collect();
+    kept.sort_by(f32::total_cmp);
+
+    let mut groups: Vec<(f32, Vec<usize>)> =
+        kept.iter().map(|&radius| (radius, Vec::new())).collect();
+    for (index, &radius) in radii.iter().enumerate() {
+        // Every kept radius is one some quad actually asked for, so this always finds a slot and every
+        // group ends up non-empty.
+        let slot = kept
+            .iter()
+            .position(|&candidate| candidate == radius)
+            .unwrap_or_else(|| {
+                kept.iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| (*a - radius).abs().total_cmp(&(*b - radius).abs()))
+                    .map(|(slot, _)| slot)
+                    .unwrap_or(0)
+            });
+        groups[slot].1.push(index);
+    }
+
+    groups
 }
 
 /// Compile a single shader stage, surfacing the driver's info log on failure.
@@ -195,12 +274,12 @@ fn set_texture_sampling(gl: &Gl) {
     gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
 }
 
-/// Bind the background texture ready for a DOM-source upload.
+/// Bind a band's texture ready for a DOM-source upload.
 ///
 /// `UNPACK_FLIP_Y_WEBGL` defaults to false, which would land source row 0 — the *top* of the DOM
 /// backdrop — at texture `t = 0`, which the fullscreen stage's `v_uv = a_position * 0.5 + 0.5`
 /// samples at the *bottom* of the canvas. Flipping on upload keeps DOM-top at canvas-top.
-fn bind_background_for_upload(gl: &Gl, texture: &WebGlTexture) {
+fn bind_band_for_upload(gl: &Gl, texture: &WebGlTexture) {
     gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
     gl.pixel_storei(Gl::UNPACK_FLIP_Y_WEBGL, 1);
     set_texture_sampling(gl);
@@ -261,6 +340,50 @@ fn create_mip_chain(gl: &Gl, width: u32, height: u32) -> Result<Vec<MipLevel>, S
         .collect()
 }
 
+/// Allocate every band: a transparent seed raster and its own blur chain.
+fn create_bands(
+    gl: &Gl,
+    width: u32,
+    height: u32,
+) -> Result<[BackdropBand; MAX_BACKDROP_BANDS], String> {
+    let mut bands = Vec::with_capacity(MAX_BACKDROP_BANDS);
+    for _ in 0..MAX_BACKDROP_BANDS {
+        bands.push(BackdropBand {
+            texture: create_band_texture(gl)?,
+            mip_chain: create_mip_chain(gl, width, height)?,
+            depth: physics::AUTO_BACKDROP_DEPTH,
+            has_content: false,
+        });
+    }
+    bands
+        .try_into()
+        .map_err(|_| "unable to allocate the backdrop bands".to_string())
+}
+
+/// Allocate one band's raster, seeded with a single transparent pixel so it is already sampleable
+/// before the first `set_band_from_*` call.
+fn create_band_texture(gl: &Gl) -> Result<WebGlTexture, String> {
+    let texture = gl
+        .create_texture()
+        .ok_or_else(|| "unable to allocate a backdrop band texture".to_string())?;
+    gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+    gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+        Gl::TEXTURE_2D,
+        0,
+        Gl::RGBA as i32,
+        1,
+        1,
+        0,
+        Gl::RGBA,
+        Gl::UNSIGNED_BYTE,
+        Some(&[0, 0, 0, 0]),
+    )
+    .map_err(|_| "unable to seed a backdrop band texture".to_string())?;
+    set_texture_sampling(gl);
+    gl.bind_texture(Gl::TEXTURE_2D, None);
+    Ok(texture)
+}
+
 impl WebGl2Renderer {
     /// Create and initialize a new WebGL2 glass renderer owning the canvas' GL context.
     pub fn new(canvas: &HtmlCanvasElement, width: u32, height: u32) -> Result<Self, String> {
@@ -275,7 +398,17 @@ impl WebGl2Renderer {
             offset: gl.get_uniform_location(&blur_program, "u_offset"),
         };
         let composite_uniforms = CompositeUniforms {
-            blurred_texture: gl.get_uniform_location(&composite_program, "u_blurred_texture"),
+            band_textures: [
+                gl.get_uniform_location(&composite_program, "u_band_texture_0"),
+                gl.get_uniform_location(&composite_program, "u_band_texture_1"),
+                gl.get_uniform_location(&composite_program, "u_band_texture_2"),
+            ],
+            band_depths: [
+                gl.get_uniform_location(&composite_program, "u_band_depth_0"),
+                gl.get_uniform_location(&composite_program, "u_band_depth_1"),
+                gl.get_uniform_location(&composite_program, "u_band_depth_2"),
+            ],
+            band_count: gl.get_uniform_location(&composite_program, "u_band_count"),
             resolution: gl.get_uniform_location(&composite_program, "u_resolution"),
             glass_bounds: gl.get_uniform_location(&composite_program, "u_glass_bounds"),
             corner_radius: gl.get_uniform_location(&composite_program, "u_corner_radius"),
@@ -293,8 +426,7 @@ impl WebGl2Renderer {
         };
 
         let (quad_vao, quad_buffer) = Self::create_fullscreen_triangle(&gl)?;
-        let background_texture = Self::create_background_texture(&gl)?;
-        let mip_chain = create_mip_chain(&gl, width, height)?;
+        let bands = create_bands(&gl, width, height)?;
 
         Ok(Self {
             gl,
@@ -307,9 +439,7 @@ impl WebGl2Renderer {
             composite_uniforms,
             quad_vao,
             quad_buffer,
-            background_texture,
-            has_real_background: false,
-            mip_chain,
+            bands,
         })
     }
 
@@ -366,28 +496,27 @@ impl WebGl2Renderer {
         Ok((vao, buffer))
     }
 
-    /// Allocate the backdrop texture, seeded with one transparent pixel so it is already sampleable
-    /// before the first `set_background_from_*` call.
-    fn create_background_texture(gl: &Gl) -> Result<WebGlTexture, String> {
-        let texture = gl
-            .create_texture()
-            .ok_or_else(|| "unable to allocate the background texture".to_string())?;
-        gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
-        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-            Gl::TEXTURE_2D,
-            0,
-            Gl::RGBA as i32,
-            1,
-            1,
-            0,
-            Gl::RGBA,
-            Gl::UNSIGNED_BYTE,
-            Some(&[0, 0, 0, 0]),
-        )
-        .map_err(|_| "unable to seed the background texture".to_string())?;
-        set_texture_sampling(gl);
-        gl.bind_texture(Gl::TEXTURE_2D, None);
-        Ok(texture)
+    /// How many bands the composite may sample: the leading run of bands that have real content.
+    ///
+    /// Leading run rather than a count, because the shader walks bands 0..count with no gaps — a band
+    /// that was never filled must not be sampled just because a nearer one was.
+    fn active_bands(&self) -> usize {
+        self.bands
+            .iter()
+            .take_while(|band| band.has_content)
+            .count()
+    }
+
+    /// Validate a caller-supplied band index against [`MAX_BACKDROP_BANDS`].
+    fn check_band(&self, band: u32) -> Result<usize, String> {
+        let index = band as usize;
+        if index < MAX_BACKDROP_BANDS {
+            Ok(index)
+        } else {
+            Err(format!(
+                "backdrop band {band} is out of range; this backend has {MAX_BACKDROP_BANDS}"
+            ))
+        }
     }
 
     /// Clear the default framebuffer to fully transparent, drawing nothing else.
@@ -403,39 +532,45 @@ impl WebGl2Renderer {
         gl.clear(Gl::COLOR_BUFFER_BIT);
     }
 
-    /// Release the current mip chain's GPU objects.
+    /// Release every band's mip chain GPU objects.
     fn delete_mip_chain(&mut self) {
-        for level in std::mem::take(&mut self.mip_chain) {
-            self.gl.delete_framebuffer(Some(&level.framebuffer));
-            self.gl.delete_texture(Some(&level.texture));
+        for band in &mut self.bands {
+            for level in std::mem::take(&mut band.mip_chain) {
+                self.gl.delete_framebuffer(Some(&level.framebuffer));
+                self.gl.delete_texture(Some(&level.texture));
+            }
         }
     }
 
-    /// Blur the backdrop down and back up through the mip chain, leaving the result in level 0.
+    /// Blur one band down and back up through its own mip chain, leaving the result in its level 0.
     ///
     /// The chain is *allocated* at [`MIP_LEVELS`] but only traversed as deep as this radius asks for
     /// ([`physics::kawase_levels_for_radius`]): each halving contributes a fixed ~15px of sigma that
     /// `blur_radius` cannot modulate, so walking all five levels for a 2px radius produced a blur an
     /// order of magnitude wider than the slider said. The level count is floored at 1, so level 0 —
-    /// the only level [`Self::run_composite_pass`] samples — is always written.
-    fn run_blur_passes(&self, blur_radius: f32) {
+    /// the only level [`Self::draw_quad_group`] samples — is always written.
+    fn run_blur_passes(&self, band: usize, blur_radius: f32) {
+        let Some(band) = self.bands.get(band) else {
+            return;
+        };
+
         let gl = &self.gl;
         gl.use_program(Some(&self.blur_program));
         gl.uniform1i(self.blur_uniforms.texture.as_ref(), 0);
         gl.active_texture(Gl::TEXTURE0);
 
         let levels = (physics::kawase_levels_for_radius(blur_radius, MIP_LEVELS as u32) as usize)
-            .min(self.mip_chain.len());
+            .min(band.mip_chain.len());
 
-        // Downsample: level 0 samples the backdrop, level n samples level n-1.
+        // Downsample: level 0 samples the band's raster, level n samples level n-1.
         for level in 0..levels {
             let source_texture = if level == 0 {
-                &self.background_texture
+                &band.texture
             } else {
-                &self.mip_chain[level - 1].texture
+                &band.mip_chain[level - 1].texture
             };
             self.draw_blur_pass(
-                &self.mip_chain[level],
+                &band.mip_chain[level],
                 source_texture,
                 physics::dual_kawase_down_step(level as u32, blur_radius),
             );
@@ -443,9 +578,9 @@ impl WebGl2Renderer {
 
         // Upsample: walk the same levels back towards level 0 with the half-step kernel.
         for level in (0..levels.saturating_sub(1)).rev() {
-            let source = &self.mip_chain[level + 1];
+            let source = &band.mip_chain[level + 1];
             self.draw_blur_pass(
-                &self.mip_chain[level],
+                &band.mip_chain[level],
                 &source.texture,
                 physics::dual_kawase_up_step(level as u32, blur_radius),
             );
@@ -477,31 +612,75 @@ impl WebGl2Renderer {
         gl.draw_arrays(Gl::TRIANGLES, 0, 3);
     }
 
-    /// Composite every quad over the canvas, sampling the blurred backdrop from mip level 0.
-    fn run_composite_pass(&self) {
+    /// Detach every band's textures from their sampler units before the blur chain writes into them.
+    ///
+    /// Mip level 0 is both the composite's source and the last upsample pass' render target. A draw
+    /// whose colour attachment is also bound to one of its samplers is a feedback loop, which WebGL2
+    /// answers with INVALID_OPERATION and no write at all — so after the first group of a frame had
+    /// composited, every later group's blur was silently dropped and kept sampling the first group's
+    /// radius. That is the shared-blur bug wearing a different hat, and it only shows up with two
+    /// distinct radii in one frame.
+    fn unbind_band_textures(&self) {
+        let gl = &self.gl;
+        for index in 0..MAX_BACKDROP_BANDS {
+            gl.active_texture(Gl::TEXTURE0 + index as u32);
+            gl.bind_texture(Gl::TEXTURE_2D, None);
+        }
+        gl.active_texture(Gl::TEXTURE0);
+    }
+
+    /// Clear the default framebuffer once, before any group draws over it.
+    fn begin_composite(&self) {
         let gl = &self.gl;
         gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
         gl.viewport(0, 0, self.width as i32, self.height as i32);
         gl.clear_color(0.0, 0.0, 0.0, 0.0);
         gl.clear(Gl::COLOR_BUFFER_BIT);
+    }
 
-        gl.enable(Gl::BLEND);
-        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+    /// Aim the composite at the canvas, and bind every band's blurred level 0 to its own texture unit.
+    ///
+    /// Called before each group's draws rather than once per frame, because the blur run in between
+    /// leaves the GL state pointed somewhere else entirely: its last pass has a mip level's framebuffer
+    /// bound and that level's viewport set, the blur program current, and its own source on unit 0. Skip
+    /// any part of this and the group composites into band 0's mip texture instead of the canvas.
+    fn bind_bands_for_composite(&self) {
+        let gl = &self.gl;
+        gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
+        gl.viewport(0, 0, self.width as i32, self.height as i32);
         gl.use_program(Some(&self.composite_program));
-        gl.active_texture(Gl::TEXTURE0);
-        if let Some(level) = self.mip_chain.first() {
-            gl.bind_texture(Gl::TEXTURE_2D, Some(&level.texture));
-        }
 
         let uniforms = &self.composite_uniforms;
-        gl.uniform1i(uniforms.blurred_texture.as_ref(), 0);
+        for (index, band) in self.bands.iter().enumerate() {
+            gl.active_texture(Gl::TEXTURE0 + index as u32);
+            if let Some(level) = band.mip_chain.first() {
+                gl.bind_texture(Gl::TEXTURE_2D, Some(&level.texture));
+            }
+            gl.uniform1i(uniforms.band_textures[index].as_ref(), index as i32);
+            gl.uniform1f(uniforms.band_depths[index].as_ref(), band.depth);
+        }
+        gl.active_texture(Gl::TEXTURE0);
+
+        gl.uniform1i(uniforms.band_count.as_ref(), self.active_bands() as i32);
         gl.uniform2f(
             uniforms.resolution.as_ref(),
             self.width as f32,
             self.height as f32,
         );
+    }
 
-        for quad in &self.quads {
+    /// Composite the given quads over the canvas, sampling each band's blurred level 0.
+    ///
+    /// Blending is enabled here and disabled again on the way out, so the blur chain that runs between
+    /// groups keeps writing its passes straight into the mip levels rather than blending them.
+    fn draw_quad_group(&self, indices: &[usize]) {
+        let gl = &self.gl;
+        self.bind_bands_for_composite();
+        gl.enable(Gl::BLEND);
+        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
+
+        let uniforms = &self.composite_uniforms;
+        for quad in indices.iter().filter_map(|&index| self.quads.get(index)) {
             // Sourced from the WebGPU-facing uniform block rather than from `quad.optical` directly,
             // so the layout owner has a consumer in the backend that actually ships: an optical field
             // left out of `GlassCompositeUniforms::from_quad` stops reaching this shader too, instead
@@ -548,7 +727,9 @@ impl GlassRenderer for WebGl2Renderer {
         self.width = width;
         self.height = height;
         self.delete_mip_chain();
-        self.mip_chain = create_mip_chain(&self.gl, width, height)?;
+        for band in &mut self.bands {
+            band.mip_chain = create_mip_chain(&self.gl, width, height)?;
+        }
         Ok(())
     }
 
@@ -567,15 +748,28 @@ impl GlassRenderer for WebGl2Renderer {
         // Nothing to refract yet. Compositing here would blur a transparent 1x1 seed into a flat
         // colour and then paint it at `alpha = 1.0` over the whole panel, hiding the content the
         // glass is supposed to show. Clear instead, and leave the CSS fallback in charge.
-        if !self.has_real_background {
+        if !self.has_real_background() {
             self.clear_canvas();
             return Ok(());
         }
 
         self.gl.bind_vertex_array(Some(&self.quad_vao));
 
-        self.run_blur_passes(average_blur_radius(&self.quads));
-        self.run_composite_pass();
+        // Clear before the loop so a frame with no quads still clears, and so each group draws over
+        // the previous group's output rather than wiping it.
+        self.begin_composite();
+
+        // One chain run per band per distinct radius. In the common case — every panel sharing one
+        // radius — that is exactly the pass count before this was per-quad. Overlapping panels with
+        // *different* radii now composite in group order (ascending radius) rather than submission
+        // order; layers.ts:13-14 already documents overlapping glass as unsupported.
+        for (radius, indices) in blur_groups(&self.quads) {
+            self.unbind_band_textures();
+            for band in 0..self.active_bands() {
+                self.run_blur_passes(band, radius);
+            }
+            self.draw_quad_group(&indices);
+        }
 
         self.gl.bind_vertex_array(None);
         Ok(())
@@ -586,12 +780,18 @@ impl GlassRenderer for WebGl2Renderer {
     }
 
     fn has_real_background(&self) -> bool {
-        self.has_real_background
+        self.active_bands() > 0
     }
 
-    fn set_background_from_canvas(&mut self, canvas: &HtmlCanvasElement) -> Result<(), String> {
+    fn set_band_from_canvas(
+        &mut self,
+        band: u32,
+        canvas: &HtmlCanvasElement,
+        depth: f32,
+    ) -> Result<(), String> {
+        let index = self.check_band(band)?;
         let gl = &self.gl;
-        bind_background_for_upload(gl, &self.background_texture);
+        bind_band_for_upload(gl, &self.bands[index].texture);
         gl.tex_image_2d_with_u32_and_u32_and_html_canvas_element(
             Gl::TEXTURE_2D,
             0,
@@ -600,22 +800,24 @@ impl GlassRenderer for WebGl2Renderer {
             Gl::UNSIGNED_BYTE,
             canvas,
         )
-        .map_err(|_| {
-            "unable to upload the canvas backdrop into the background texture".to_string()
-        })?;
+        .map_err(|_| format!("unable to upload the canvas backdrop into band {band}"))?;
         // Only a successful upload earns readiness. A `SecurityError` from a tainted canvas lands in
         // the `map_err` above and leaves the flag false, so a failed upload degrades instead of
         // compositing over whatever the texture happened to hold.
-        self.has_real_background = true;
+        self.bands[index].depth = depth;
+        self.bands[index].has_content = true;
         Ok(())
     }
 
-    fn set_background_from_offscreen_canvas(
+    fn set_band_from_offscreen_canvas(
         &mut self,
+        band: u32,
         canvas: &OffscreenCanvas,
+        depth: f32,
     ) -> Result<(), String> {
+        let index = self.check_band(band)?;
         let gl = &self.gl;
-        bind_background_for_upload(gl, &self.background_texture);
+        bind_band_for_upload(gl, &self.bands[index].texture);
         gl.tex_image_2d_with_u32_and_u32_and_offscreen_canvas(
             Gl::TEXTURE_2D,
             0,
@@ -624,10 +826,33 @@ impl GlassRenderer for WebGl2Renderer {
             Gl::UNSIGNED_BYTE,
             canvas,
         )
-        .map_err(|_| {
-            "unable to upload the offscreen backdrop into the background texture".to_string()
-        })?;
-        self.has_real_background = true;
+        .map_err(|_| format!("unable to upload the offscreen backdrop into band {band}"))?;
+        self.bands[index].depth = depth;
+        self.bands[index].has_content = true;
+        Ok(())
+    }
+
+    fn release_bands_from(&mut self, first: u32) {
+        for band in self.bands.iter_mut().skip(first as usize) {
+            band.has_content = false;
+            band.depth = physics::AUTO_BACKDROP_DEPTH;
+        }
+    }
+
+    fn set_background_from_canvas(&mut self, canvas: &HtmlCanvasElement) -> Result<(), String> {
+        // The single-layer path: one band at the calibrated fallback depth, and every nearer band
+        // released, so an app that never mentions depth renders exactly as it did before banding.
+        self.set_band_from_canvas(0, canvas, physics::AUTO_BACKDROP_DEPTH)?;
+        self.release_bands_from(1);
+        Ok(())
+    }
+
+    fn set_background_from_offscreen_canvas(
+        &mut self,
+        canvas: &OffscreenCanvas,
+    ) -> Result<(), String> {
+        self.set_band_from_offscreen_canvas(0, canvas, physics::AUTO_BACKDROP_DEPTH)?;
+        self.release_bands_from(1);
         Ok(())
     }
 }
@@ -635,7 +860,9 @@ impl GlassRenderer for WebGl2Renderer {
 impl Drop for WebGl2Renderer {
     fn drop(&mut self) {
         self.delete_mip_chain();
-        self.gl.delete_texture(Some(&self.background_texture));
+        for band in &self.bands {
+            self.gl.delete_texture(Some(&band.texture));
+        }
         self.gl.delete_buffer(Some(&self.quad_buffer));
         self.gl.delete_vertex_array(Some(&self.quad_vao));
         self.gl.delete_program(Some(&self.blur_program));
@@ -673,7 +900,13 @@ mod tests {
         assert!(COMPOSITE_FRAGMENT_SHADER.starts_with("#version 300 es"));
         assert!(COMPOSITE_FRAGMENT_SHADER.contains("in vec2 v_uv;"));
         for uniform in [
-            "u_blurred_texture",
+            "u_band_texture_0",
+            "u_band_texture_1",
+            "u_band_texture_2",
+            "u_band_depth_0",
+            "u_band_depth_1",
+            "u_band_depth_2",
+            "u_band_count",
             "u_resolution",
             "u_glass_bounds",
             "u_corner_radius",
@@ -753,23 +986,99 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_average_blur_radius_defaults_without_quads() {
-        assert_eq!(
-            average_blur_radius(&[]),
-            OpticalParams::default().blur_radius
-        );
+    /// A quad that asks for exactly this blur radius.
+    fn quad_blurred(blur_radius: f32) -> GlassQuad {
+        let mut quad = GlassQuad::default();
+        quad.optical.blur_radius = blur_radius;
+        quad
     }
 
     #[test]
-    fn test_average_blur_radius_means_submitted_quads() {
-        let mut soft = GlassQuad::default();
-        soft.optical.blur_radius = 10.0;
-        let mut hard = GlassQuad::default();
-        hard.optical.blur_radius = 30.0;
+    fn test_blur_groups_splits_distinct_radii() {
+        // The case that used to render both panels at the mean of 20: two radii, two chain runs, and
+        // each quad drawn with the blur it asked for.
+        let quads = [quad_blurred(10.0), quad_blurred(30.0), quad_blurred(10.0)];
+        let groups = blur_groups(&quads);
 
-        assert!((average_blur_radius(&[soft]) - 10.0).abs() < 1e-6);
-        assert!((average_blur_radius(&[soft, hard]) - 20.0).abs() < 1e-6);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, 10.0);
+        assert_eq!(groups[0].1, vec![0, 2], "indices stay in submission order");
+        assert_eq!(groups[1].0, 30.0);
+        assert_eq!(groups[1].1, vec![1]);
+    }
+
+    #[test]
+    fn test_blur_groups_merge_within_the_quantum() {
+        // Half a CSS blur pixel apart is not worth a second full chain run.
+        let quads = [quad_blurred(16.0), quad_blurred(16.4)];
+        let groups = blur_groups(&quads);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, 16.0);
+        assert_eq!(groups[0].1, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_blur_groups_cap_at_max_blur_groups() {
+        // Six distinct radii, with 4.0 and 40.0 the most common, so those two are certainly kept and
+        // the rarest four compete for the remaining slots.
+        let quads = [
+            quad_blurred(4.0),
+            quad_blurred(4.0),
+            quad_blurred(40.0),
+            quad_blurred(40.0),
+            quad_blurred(8.0),
+            quad_blurred(12.0),
+            quad_blurred(20.0),
+            quad_blurred(28.0),
+        ];
+        let groups = blur_groups(&quads);
+
+        assert!(
+            groups.len() <= MAX_BLUR_GROUPS,
+            "the pass count must stay bounded, got {} groups",
+            groups.len()
+        );
+        let kept: Vec<f32> = groups.iter().map(|(radius, _)| *radius).collect();
+        assert!(
+            kept.windows(2).all(|pair| pair[0] < pair[1]),
+            "groups must come back in ascending radius order: {kept:?}"
+        );
+        assert!(kept.contains(&4.0) && kept.contains(&40.0));
+
+        let mut placed: Vec<usize> = groups
+            .iter()
+            .flat_map(|(_, indices)| indices.iter().copied())
+            .collect();
+        placed.sort_unstable();
+        assert_eq!(
+            placed,
+            (0..quads.len()).collect::<Vec<_>>(),
+            "every quad must be drawn exactly once"
+        );
+
+        // A snapped quad lands on the nearest kept radius, not just any of them.
+        for (radius, indices) in &groups {
+            for &index in indices {
+                let asked = quads[index].optical.blur_radius;
+                let nearest = kept
+                    .iter()
+                    .copied()
+                    .min_by(|a, b| (a - asked).abs().total_cmp(&(b - asked).abs()))
+                    .expect("at least one group");
+                assert_eq!(
+                    *radius, nearest,
+                    "quad {index} asked for {asked} and was snapped to {radius} rather than {nearest}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_blur_groups_are_empty_without_quads() {
+        // No quads means no blur work at all. `render()` still calls `begin_composite`, which clears
+        // the canvas, so an empty frame is transparent rather than stale.
+        assert!(blur_groups(&[]).is_empty());
     }
 
     // The `normalized_glass_bounds` tests moved to `renderer::uniforms` with the function itself, so

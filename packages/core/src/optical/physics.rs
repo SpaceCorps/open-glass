@@ -141,6 +141,39 @@ pub fn snell_refraction_vector(incident: Vec3, normal: Vec3, n1: f32, n2: f32) -
 /// half-size, i.e. the "subtle, approximately 2-3% centre magnification" macOS parity target.
 pub const BODY_LENS_DEPTH_SCALE: f32 = 1.2;
 
+/// Sentinel a caller passes for a backdrop band whose distance behind the glass is unknown.
+///
+/// Negative because a real depth never is, so one `float` uniform carries both "this band is 480px
+/// away" and "nobody said" without a companion flag.
+pub const AUTO_BACKDROP_DEPTH: f32 = -1.0;
+
+/// Distance from the rear face to a backdrop band, resolving [`AUTO_BACKDROP_DEPTH`] against the
+/// panel's own geometry.
+///
+/// This is the one place [`BODY_LENS_DEPTH_SCALE`] survives: a band that declares its own depth is
+/// traced over that real distance, and only a band with no declared depth falls back to the
+/// calibrated, scale-invariant approximation. Mirrored verbatim as `resolveBackdropDepth` in
+/// `glass_composite.frag`; the two must not drift.
+pub fn resolve_backdrop_depth(band_depth: f32, panel_half_height: f32) -> f32 {
+    if band_depth < 0.0 {
+        panel_half_height * BODY_LENS_DEPTH_SCALE
+    } else {
+        band_depth
+    }
+}
+
+/// Granularity, in `blur_radius` units, at which distinct panel radii are merged into one blur chain.
+///
+/// One unit of `blur_radius` is [`CSS_BLUR_PIXELS_PER_RADIUS`] CSS blur pixels, so a 1.0 quantum is
+/// half a CSS pixel of sigma — below what a reader can distinguish — and it is what bounds how many
+/// blur chains a single frame can be asked to run.
+pub const BLUR_RADIUS_QUANTUM: f32 = 1.0;
+
+/// Snap a blur radius to the nearest [`BLUR_RADIUS_QUANTUM`], clamping negatives to zero.
+pub fn quantize_blur_radius(radius: f32) -> f32 {
+    (radius.max(0.0) / BLUR_RADIUS_QUANTUM).round() * BLUR_RADIUS_QUANTUM
+}
+
 /// Surface normal of the convex dome that spans the glass body, at panel-relative position `p`.
 ///
 /// The dome is `z = curvature * (1 - |u|^2)` over the normalized interior coordinate
@@ -700,6 +733,70 @@ mod tests {
             "the default body lens magnifies by {:.1}% of the panel half-size, outside the 2-3% macOS \
              parity band; BODY_LENS_DEPTH_SCALE or the default curvature needs recalibrating",
             magnification * 100.0
+        );
+    }
+
+    #[test]
+    fn test_resolve_backdrop_depth_falls_back_to_the_calibrated_scale() {
+        // A band that never said how far away it is keeps Plan 00661's look exactly: the calibrated
+        // multiple of the panel's own half-height.
+        let half_height = 65.0;
+        assert_eq!(
+            resolve_backdrop_depth(AUTO_BACKDROP_DEPTH, half_height),
+            half_height * BODY_LENS_DEPTH_SCALE
+        );
+    }
+
+    #[test]
+    fn test_resolve_backdrop_depth_passes_an_explicit_distance_through() {
+        // An explicit distance is a real distance: panel size must not scale it, or two panels of
+        // different sizes would disagree about where the same wallpaper is.
+        assert_eq!(resolve_backdrop_depth(480.0, 65.0), 480.0);
+        assert_eq!(resolve_backdrop_depth(480.0, 600.0), 480.0);
+        assert_eq!(resolve_backdrop_depth(0.0, 65.0), 0.0, "0 is at the glass");
+    }
+
+    #[test]
+    fn test_backdrop_depth_produces_proportional_parallax() {
+        // The property this whole depth-banding exists to deliver, asserted on the reference
+        // implementation and not only in the shader: a farther band's sample point travels further.
+        let half_size = Vec2::new(200.0, 120.0);
+        let params = OpticalParams::default();
+        let p = Vec2::new(half_size.x / 3.0f32.sqrt(), 0.0);
+        let front = volumetric_lens_normal(p, half_size, params.curvature);
+        let at = |depth: f32| {
+            dual_surface_refraction_offset_at_depth(
+                Vec3::new(0.0, 0.0, -1.0),
+                front,
+                Vec3::new(0.0, 0.0, 1.0),
+                params.ior,
+                params.thickness,
+                depth,
+            )
+            .length()
+        };
+
+        let near = at(100.0);
+        let far = at(400.0);
+        assert!(near > 0.0, "the near band must displace at all");
+        assert!(far > 0.0, "the far band must displace at all");
+        let ratio = far / near;
+        assert!(
+            (3.0..=5.0).contains(&ratio),
+            "4x the distance must buy roughly 4x the displacement (the fixed internal leg dilutes it \
+             slightly); got {ratio:.2}x from {near:.3}px and {far:.3}px"
+        );
+    }
+
+    #[test]
+    fn test_quantize_blur_radius_snaps_to_the_quantum() {
+        assert_eq!(quantize_blur_radius(16.4), 16.0);
+        assert_eq!(quantize_blur_radius(15.6), 16.0);
+        assert_eq!(quantize_blur_radius(16.0), 16.0);
+        assert_eq!(
+            quantize_blur_radius(-4.0),
+            0.0,
+            "a negative radius is not a blur; it clamps rather than producing a negative tap step"
         );
     }
 

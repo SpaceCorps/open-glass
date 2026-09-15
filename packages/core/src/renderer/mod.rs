@@ -62,7 +62,34 @@ pub trait GlassRenderer {
         false
     }
 
-    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into one depth band.
+    ///
+    /// `band` is 0-based and ordered far to near; `depth` is the distance in pixels from the glass rear
+    /// face to that content, or `physics::AUTO_BACKDROP_DEPTH` when the caller does not know.
+    fn set_band_from_canvas(
+        &mut self,
+        _band: u32,
+        _canvas: &web_sys::HtmlCanvasElement,
+        _depth: f32,
+    ) -> Result<(), String> {
+        Err("backend does not support background texture ingestion".to_string())
+    }
+
+    /// [`Self::set_band_from_canvas`] from an `OffscreenCanvas`.
+    fn set_band_from_offscreen_canvas(
+        &mut self,
+        _band: u32,
+        _canvas: &web_sys::OffscreenCanvas,
+        _depth: f32,
+    ) -> Result<(), String> {
+        Err("backend does not support background texture ingestion".to_string())
+    }
+
+    /// Stop sampling bands `first` and nearer, so an unmounted content layer's stale raster cannot
+    /// keep being refracted.
+    fn release_bands_from(&mut self, _first: u32) {}
+
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` as the sole backdrop band.
     fn set_background_from_canvas(
         &mut self,
         _canvas: &web_sys::HtmlCanvasElement,
@@ -70,7 +97,7 @@ pub trait GlassRenderer {
         Err("backend does not support background texture ingestion".to_string())
     }
 
-    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` into the background texture.
+    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` as the sole backdrop band.
     fn set_background_from_offscreen_canvas(
         &mut self,
         _canvas: &web_sys::OffscreenCanvas,

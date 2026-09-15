@@ -1,9 +1,11 @@
 import initWasm, {
   calculate_fresnel,
   init_panic_hook,
+  max_backdrop_bands,
   RendererBackend,
   WasmGlassEngine,
 } from "@open-glass/core/wasm";
+import { AUTO_BACKDROP_DEPTH } from "./bands";
 import type {
   BackgroundTextureSource,
   GlassEngine,
@@ -16,6 +18,7 @@ import { warnOnce } from "./warn";
 
 export * from "./types";
 export * from "./capture";
+export * from "./bands";
 
 export type { InitInput, InitOutput, SyncInitInput } from "@open-glass/core/wasm";
 
@@ -90,6 +93,16 @@ export function isWasmEngineLoaded(): boolean {
 }
 
 /**
+ * How many depth bands the backdrop can be split into.
+ *
+ * Read from Rust (`max_backdrop_bands()`) once the wasm engine is loaded, so the band assignment on the
+ * capture side cannot disagree with the number of samplers `glass_composite.frag` declares — a fourth
+ * band would be uploaded, ignored by the shader, and its content would simply not appear in the glass.
+ * The literal is only the value before wasm is up, where nothing uploads anything anyway.
+ */
+export let MAX_BACKDROP_BANDS = 3;
+
+/**
  * Initialize the open-glass WebAssembly optical engine.
  *
  * @param wasmModuleUrlOrBuffer Optional module source (URL, Response, ArrayBuffer, BufferSource, or WebAssembly.Module).
@@ -141,6 +154,16 @@ export async function initWasmEngine(
     init_panic_hook();
   } catch {
     // Console panic hook initialization is best-effort
+  }
+
+  try {
+    const bands = max_backdrop_bands();
+    if (bands > 0) {
+      MAX_BACKDROP_BANDS = bands;
+    }
+  } catch {
+    // An older wasm binary without the export: keep the literal, which is the value that binary was
+    // built with.
   }
 
   wasmEngineLoaded = true;
@@ -326,24 +349,28 @@ class GlassEngineImpl implements GlassEngine {
   }
 
   /**
-   * Hand a canvas-backed backdrop to the Rust renderer, which owns the WebGL2 background texture.
+   * Hand one band's canvas-backed raster to the Rust renderer, which owns the WebGL2 band textures.
    *
    * `uploaded` is false when Rust cannot accept this source, so the caller falls back to the JS
    * upload. `error` carries a thrown rejection rather than warning about it here: the JS path may
    * still accept the same source, and only a failure of *both* paths is worth telling anyone about.
    */
-  private uploadBackgroundViaWasm(source: BackgroundTextureSource): {
+  private uploadBandViaWasm(
+    band: number,
+    source: BackgroundTextureSource,
+    depth: number,
+  ): {
     uploaded: boolean;
     error: unknown;
   } {
     if (!this.wasmEngine) return { uploaded: false, error: null };
     try {
       if (typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement) {
-        this.wasmEngine.set_background_from_canvas(source);
+        this.wasmEngine.set_band_from_canvas(band, source, depth);
         return { uploaded: true, error: null };
       }
       if (typeof OffscreenCanvas !== "undefined" && source instanceof OffscreenCanvas) {
-        this.wasmEngine.set_background_from_offscreen_canvas(source);
+        this.wasmEngine.set_band_from_offscreen_canvas(band, source, depth);
         return { uploaded: true, error: null };
       }
     } catch (error) {
@@ -352,7 +379,19 @@ class GlassEngineImpl implements GlassEngine {
     return { uploaded: false, error: null };
   }
 
-  updateBackgroundSource(source: BackgroundTextureSource): void {
+  /**
+   * Upload one depth band's raster, band 0 farthest.
+   *
+   * `depth` is the distance in pixels behind the glass' rear face; omitted, it is
+   * [`AUTO_BACKDROP_DEPTH`], which asks the shader for the depth calibrated from the panel's own size.
+   * Uploading past `MAX_BACKDROP_BANDS` is rejected by Rust and warned about here rather than silently
+   * ignored, because a band the shader never samples means content missing from the glass.
+   */
+  updateBackdropBand(
+    band: number,
+    source: BackgroundTextureSource,
+    depth: number = AUTO_BACKDROP_DEPTH,
+  ): void {
     if (this.destroyed) return;
     this.backgroundSource = source;
 
@@ -370,7 +409,7 @@ class GlassEngineImpl implements GlassEngine {
     // ImageBitmap / ImageData / HTMLImageElement / HTMLVideoElement are not accepted by the Rust
     // entry points; those sources leave the backdrop untouched, which `isRenderReady()` reflects.
     if (this.wasmEngine) {
-      const wasmUpload = this.uploadBackgroundViaWasm(source);
+      const wasmUpload = this.uploadBandViaWasm(band, source, depth);
       if (wasmUpload.uploaded) {
         return;
       }
@@ -412,6 +451,31 @@ class GlassEngineImpl implements GlassEngine {
         uploadError,
       );
     }
+  }
+
+  releaseBackdropBandsFrom(band: number): void {
+    if (this.destroyed) return;
+    if (!this.wasmEngine) return;
+    try {
+      this.wasmEngine.release_bands_from(band);
+    } catch (error) {
+      // An older wasm binary without the export. Warn rather than swallow: a band that keeps being
+      // sampled after its content layer unmounted refracts a raster of something that is no longer on
+      // the page, which looks like a rendering bug with no obvious cause.
+      warnOnce("backdrop-band-release", "failed to release backdrop bands:", error);
+    }
+  }
+
+  /**
+   * The single-band path every consumer outside the provider still uses.
+   *
+   * One raster at the calibrated depth *and* a release of everything nearer, so a caller that switches
+   * from the banded API back to this one does not leave a stale near band being refracted over its new
+   * backdrop.
+   */
+  updateBackgroundSource(source: BackgroundTextureSource): void {
+    this.updateBackdropBand(0, source, AUTO_BACKDROP_DEPTH);
+    this.releaseBackdropBandsFrom(1);
   }
 
   hasBackgroundSource(): boolean {

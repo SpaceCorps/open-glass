@@ -77,6 +77,13 @@ export interface GlassEngine {
   updateQuads(quads: GlassQuadDescriptor[]): void;
   /** Ingest an external image source or offscreen canvas as the background texture. */
   updateBackgroundSource(source: BackgroundTextureSource): void;
+  /**
+   * Upload one depth band's raster. `band` is 0-based and ordered far to near; `depth` is the distance
+   * in pixels behind the glass, omitted for the calibrated default derived from the panel's own size.
+   */
+  updateBackdropBand(band: number, source: BackgroundTextureSource, depth?: number): void;
+  /** Stop sampling bands from `band` upward, e.g. when a content layer unmounts. */
+  releaseBackdropBandsFrom(band: number): void;
   /** Check if a valid background texture has been provided. */
   hasBackgroundSource(): boolean;
   /**

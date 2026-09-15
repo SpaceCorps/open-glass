@@ -22,6 +22,8 @@ export const App: React.FC = () => {
   });
   const [captureEnabled, setCaptureEnabled] = useState(true);
   const [captureFps, setCaptureFps] = useState(30);
+  // Depth of the demo's floating-card layer. The document layer behind it is fixed at 480px.
+  const [nearBandDepth, setNearBandDepth] = useState(80);
 
   return (
     <GlassProvider captureUnderlying={captureEnabled} captureFps={captureFps}>
@@ -97,7 +99,9 @@ export const App: React.FC = () => {
         <div style={{ display: "flex", flex: 1, padding: "1.5rem", gap: "1.5rem" }}>
           {/* Main Stage */}
           <main style={{ flex: 1, minWidth: 0 }}>
-            {view === "desktop" && <DesktopDemo optical={optical} />}
+            {view === "desktop" && (
+              <DesktopDemo optical={optical} nearBandDepth={nearBandDepth} />
+            )}
             {view === "visionos" && <VisionOSDemo optical={optical} />}
             {view === "forms" && <FormsDemo optical={optical} />}
             {view === "components" && (
@@ -204,6 +208,8 @@ export const App: React.FC = () => {
               onCaptureEnabledChange={setCaptureEnabled}
               captureFps={captureFps}
               onCaptureFpsChange={setCaptureFps}
+              nearBandDepth={nearBandDepth}
+              onNearBandDepthChange={setNearBandDepth}
             />
           </aside>
         </div>
