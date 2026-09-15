@@ -20,14 +20,19 @@ struct DownsampleUniforms {
     blur_radius: f32,
 };
 
+/// Per-level tap step scale. Must equal `physics::KAWASE_STEP_SCALE`; the WGSL is not compiled by
+/// anything yet, so `test_wgsl_blur_shaders_use_the_calibrated_step_scale` in `renderer::webgpu` is
+/// what keeps the two in step.
+const KAWASE_STEP_SCALE: f32 = 0.20;
+
 @group(0) @binding(0) var<uniform> uniforms: DownsampleUniforms;
 @group(0) @binding(1) var source_texture: texture_2d<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let step = (uniforms.iteration + 1.0) * max(uniforms.blur_radius * 0.25, 1.0);
-    let offset = uniforms.texel_size * step * 0.5;
+    let step = (uniforms.iteration + 1.0) * max(uniforms.blur_radius * KAWASE_STEP_SCALE, 1.0);
+    let offset = uniforms.texel_size * step;
 
     var color = textureSample(source_texture, texture_sampler, in.uv + vec2<f32>(-offset.x, -offset.y));
     color += textureSample(source_texture, texture_sampler, in.uv + vec2<f32>(offset.x, -offset.y));
