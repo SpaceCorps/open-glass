@@ -3,6 +3,7 @@ import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 import { GLASS_Z_SURFACE } from "../layers";
+import { glassHandoverStyle } from "../surface";
 
 export interface GlassCardProps extends HTMLAttributes<HTMLDivElement> {
   children?: ReactNode;
@@ -36,6 +37,16 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
     // evidence the GPU drew anything, and dropping the blur before it does leaves nothing visible.
     const isRenderReady = context?.isRenderReady ?? false;
 
+    const handover = glassHandoverStyle({
+      isRenderReady,
+      fallbackBackground: "rgba(255, 255, 255, 0.15)",
+      readyBackground: "rgba(255, 255, 255, 0.03)",
+      cssBackdrop: "blur(20px)",
+      transition:
+        style?.transition ??
+        (interactive ? "transform 0.2s ease, box-shadow 0.2s ease" : undefined),
+    });
+
     const elevationStyles: Record<string, React.CSSProperties> = {
       flat: {
         boxShadow: "0 2px 10px rgba(0, 0, 0, 0.05)",
@@ -64,13 +75,13 @@ export const GlassCard = forwardRef<HTMLDivElement, GlassCardProps>(
           zIndex: GLASS_Z_SURFACE,
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.28)",
-          background: isRenderReady ? "rgba(255, 255, 255, 0.03)" : "rgba(255, 255, 255, 0.15)",
-          backdropFilter: isRenderReady ? "none" : "blur(20px)",
-          WebkitBackdropFilter: isRenderReady ? "none" : "blur(20px)",
+          ...handover,
           overflow: "hidden",
-          transition: interactive ? "transform 0.2s ease, box-shadow 0.2s ease" : undefined,
           ...elevationStyles[elevation],
           ...style,
+          // After `...style`: the caller's own transition is already folded into the handover, and
+          // spreading it last would drop the overlay cross-fade appended to it.
+          transition: handover.transition,
         }}
         {...rest}
       >

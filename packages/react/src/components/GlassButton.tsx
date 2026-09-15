@@ -9,6 +9,7 @@ import React, {
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { glassHandoverStyle } from "../surface";
 
 export interface GlassButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   children?: ReactNode;
@@ -46,7 +47,15 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
     // composites, keeping the CSS blur on would stack two different glass models in one scene.
     const context = useContext(GlassContext);
     const isRenderReady = context?.isRenderReady ?? false;
-    const cssBackdrop = "blur(16px)";
+    const handover = glassHandoverStyle({
+      isRenderReady,
+      fallbackBackground:
+        variant === "primary" ? "rgba(255, 255, 255, 0.22)" : "rgba(255, 255, 255, 0.12)",
+      readyBackground:
+        variant === "primary" ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.04)",
+      cssBackdrop: "blur(16px)",
+      transition: style?.transition ?? "transform 0.1s ease, box-shadow 0.15s ease",
+    });
 
     const handlePointerMove = (e: PointerEvent<HTMLButtonElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
@@ -91,15 +100,7 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
           padding: "0.625rem 1.25rem",
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.35)",
-          background: isRenderReady
-            ? variant === "primary"
-              ? "rgba(255, 255, 255, 0.08)"
-              : "rgba(255, 255, 255, 0.04)"
-            : variant === "primary"
-              ? "rgba(255, 255, 255, 0.22)"
-              : "rgba(255, 255, 255, 0.12)",
-          backdropFilter: isRenderReady ? "none" : cssBackdrop,
-          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
+          ...handover,
           boxShadow: isPressed
             ? "0 2px 6px rgba(0, 0, 0, 0.15)"
             : "0 6px 20px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.08)",
@@ -109,12 +110,13 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
           cursor: "pointer",
           overflow: "hidden",
           userSelect: "none",
-          transition: "transform 0.1s ease, box-shadow 0.15s ease",
           outline: "none",
           ...style,
-          // After `...style`: the caller's transform is already folded into combinedTransform, and
-          // spreading it last would drop the press scale.
+          // After `...style`: the caller's transform is already folded into combinedTransform and the
+          // caller's transition into the handover, and spreading it last would drop the press scale
+          // and the overlay cross-fade appended to them.
           transform: combinedTransform,
+          transition: handover.transition,
         }}
         {...rest}
       >

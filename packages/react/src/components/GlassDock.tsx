@@ -8,6 +8,7 @@ import React, {
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { glassHandoverStyle } from "../surface";
 
 export interface GlassDockItem {
   id: string;
@@ -39,7 +40,13 @@ export const GlassDock = forwardRef<HTMLDivElement, GlassDockProps>(
     // GlassCard / GlassWindow, keyed off renderer readiness rather than `hasBackgroundSource`.
     const context = useContext(GlassContext);
     const isRenderReady = context?.isRenderReady ?? false;
-    const cssBackdrop = "blur(28px) saturate(190%)";
+    const handover = glassHandoverStyle({
+      isRenderReady,
+      fallbackBackground: "rgba(255, 255, 255, 0.16)",
+      readyBackground: "rgba(255, 255, 255, 0.04)",
+      cssBackdrop: "blur(28px) saturate(190%)",
+      transition: style?.transition,
+    });
 
     return (
       <div
@@ -60,11 +67,12 @@ export const GlassDock = forwardRef<HTMLDivElement, GlassDockProps>(
           padding: "10px 16px",
           borderRadius: `${cornerRadius}px`,
           border: "1px solid rgba(255, 255, 255, 0.35)",
-          background: isRenderReady ? "rgba(255, 255, 255, 0.04)" : "rgba(255, 255, 255, 0.16)",
-          backdropFilter: isRenderReady ? "none" : cssBackdrop,
-          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
+          ...handover,
           boxShadow: "0 20px 50px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.1)",
           ...style,
+          // After `...style`: the caller's own transition is already folded into the handover, and
+          // spreading it last would drop the overlay cross-fade appended to it.
+          transition: handover.transition,
         }}
         onMouseLeave={() => setHoveredIndex(null)}
         {...rest}

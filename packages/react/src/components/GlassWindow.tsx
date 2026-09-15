@@ -10,6 +10,7 @@ import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
 import { GLASS_Z_SURFACE } from "../layers";
+import { glassHandoverStyle } from "../surface";
 
 import { useParallaxTilt } from "../hooks/useParallaxTilt";
 
@@ -134,6 +135,18 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
           : "transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1)"
         : "none");
 
+    // The handover appends its own entry to whichever transition won above, so the parallax transform
+    // ramp and a caller's own transition both survive the overlay cross-fade.
+    const handover = glassHandoverStyle({
+      isRenderReady,
+      fallbackBackground:
+        variant === "visionos" ? "rgba(255, 255, 255, 0.18)" : "rgba(240, 240, 245, 0.22)",
+      readyBackground:
+        variant === "visionos" ? "rgba(255, 255, 255, 0.04)" : "rgba(240, 240, 245, 0.05)",
+      cssBackdrop: "blur(32px) saturate(180%)",
+      transition: resolvedTransition,
+    });
+
     return (
       <div
         ref={(node) => {
@@ -161,15 +174,7 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
             variant === "visionos"
               ? "1.5px solid rgba(255, 255, 255, 0.45)"
               : "1px solid rgba(255, 255, 255, 0.3)",
-          background: isRenderReady
-            ? variant === "visionos"
-              ? "rgba(255, 255, 255, 0.04)"
-              : "rgba(240, 240, 245, 0.05)"
-            : variant === "visionos"
-              ? "rgba(255, 255, 255, 0.18)"
-              : "rgba(240, 240, 245, 0.22)",
-          backdropFilter: isRenderReady ? "none" : "blur(32px) saturate(180%)",
-          WebkitBackdropFilter: isRenderReady ? "none" : "blur(32px) saturate(180%)",
+          ...handover,
           boxShadow:
             variant === "visionos"
               ? "0 30px 80px rgba(0, 0, 0, 0.35), 0 0 40px rgba(255, 255, 255, 0.15)"
@@ -180,10 +185,11 @@ export const GlassWindow = forwardRef<HTMLDivElement, GlassWindowProps>(
           transformStyle: "preserve-3d",
           perspective: "1000px",
           ...style,
-          // After `...style`: the caller's transform is already folded into combinedTransform, and
-          // spreading it last would drop the parallax tilt appended to it.
+          // After `...style`: the caller's transform is already folded into combinedTransform and the
+          // caller's transition into the handover, and spreading it last would drop the parallax tilt
+          // and the overlay cross-fade appended to them.
           transform: combinedTransform,
-          transition: resolvedTransition,
+          transition: handover.transition,
         }}
         {...rest}
       >
