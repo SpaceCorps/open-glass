@@ -21,8 +21,19 @@ struct OpticalUniforms {
     sheen_intensity: f32,
     light_angle: f32,
     roughness: f32,
+    // Luma-preserving chroma scale applied after the tint mix. 1.0 leaves the backdrop's
+    // saturation untouched; the CSS fallback's `saturate(180%)` is why the default is not 1.0.
+    saturation: f32,
+    // Multiplicative exposure gain applied after the saturation clamp and before the additive
+    // sheen. Buys back the luma the CSS-to-GPU handover drops when its overlay goes from alpha
+    // 0.22 to 0.05 — a gain rather than more white tint, because a veil at alpha `a` scales
+    // per-pixel channel spread by `1 - a` while a gain scales it by `g`, and the composite is
+    // short on chroma as well as luma.
+    brightness: f32,
     thickness: f32,
     curvature: f32,
+    // With saturation/brightness above, the struct is now 11 scalars + this padding = 48 bytes,
+    // so tint_color lands at offset 48 with no implicit gap before it.
     padding: f32,
     tint_color: vec4<f32>,
     resolution: vec2<f32>,
@@ -175,7 +186,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Final composition with glass tint
     let tinted = mix(refracted_color, optical.tint_color.rgb, optical.tint_color.a);
-    let final_rgb = tinted + vec3<f32>(fresnel) + vec3<f32>(specular + border_light + inner_bevel_light);
+    // CSS `saturate(N%)` is a luma-preserving chroma scale, and the fallback literals all use
+    // 180-190%. The clamp matters: `mix` with a factor above 1.0 extrapolates and can drive a
+    // channel out of [0, 1] before the additive sheen ever lands on it.
+    let luma = dot(tinted, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let saturated = clamp(mix(vec3<f32>(luma), tinted, optical.saturation), 0.0, 1.0);
+    // Buys back the luma the handover drops when the CSS overlay goes from alpha 0.22 to 0.05.
+    // Before the sheen: the sheen is additive, so scaling it would blow highlights.
+    let brightened = clamp(saturated * optical.brightness, 0.0, 1.0);
+    let final_rgb = brightened + vec3<f32>(fresnel) + vec3<f32>(specular + border_light + inner_bevel_light);
 
     return vec4<f32>(final_rgb, alpha);
 }
