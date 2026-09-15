@@ -13,6 +13,12 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// The one uniform block this pass binds. Its layout is owned by `KawaseUpsampleUniforms` in
+// packages/core/src/renderer/uniforms.rs, which is `#[repr(C, align(16))]` + `bytemuck::Pod` and
+// asserts every offset below at compile time;
+// `test_kawase_upsample_uniforms_match_the_wgsl_declaration` parses this declaration and pins
+// the three field-for-field, because nothing here is compiled yet. Do not append a field without
+// deciding its slot in `uniforms.rs` first.
 struct UpsampleUniforms {
     texel_size: vec2<f32>,
     iteration: f32,

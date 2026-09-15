@@ -15,8 +15,10 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
 
 // The one uniform block this pass binds. Its layout is owned by `GlassCompositeUniforms` in
 // packages/core/src/renderer/uniforms.rs, which is `#[repr(C, align(16))]` + `bytemuck::Pod` and
-// asserts every offset below at compile time; `test_composite_uniforms_match_the_wgsl_declaration`
-// parses this declaration and pins the two field-for-field, because nothing here is compiled yet.
+// asserts every offset below at compile time; `tests/wgsl_shaders.rs` parses and validates this
+// file with naga and checks the same offsets against the compiler's own layout, and
+// `test_composite_uniforms_match_the_wgsl_declaration` separately pins declaration order and type
+// spelling by parsing this declaration's text.
 //
 // The order is the layout. Twelve scalars fill three complete 16-byte rows (bytes 0-47), so the two
 // `vec4<f32>` members land on their 16-byte boundaries with no *implicit* padding anywhere in the
@@ -206,8 +208,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //
     // Both clamps take `vec3<f32>` bounds, not the scalar `0.0, 1.0` the GLSL sibling uses: WGSL's
     // `clamp` requires all three arguments to be the same type, where GLSL overloads it for a vector
-    // value with scalar bounds. Nothing compiles this file, so the scalar spelling would have gone
-    // unnoticed until the first naga validation.
+    // value with scalar bounds. `cargo test` now runs this file through naga, so reverting either
+    // clamp to the scalar spelling fails `tests/wgsl_shaders.rs` (see
+    // `the_glsl_style_scalar_clamp_is_rejected`) instead of surfacing at the first real frame.
     let brightened = clamp(saturated * optical.brightness, vec3<f32>(0.0), vec3<f32>(1.0));
     let final_rgb = brightened + vec3<f32>(fresnel) + vec3<f32>(specular + border_light + inner_bevel_light);
 

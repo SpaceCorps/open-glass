@@ -129,12 +129,19 @@ mod tests {
     #[test]
     fn test_wgsl_composite_declares_every_frag_uniform() {
         let frag_names = frag_uniform_names(COMPOSITE_FRAG);
-        assert_eq!(frag_names.len(), 15, "expected 15 uniforms in glass_composite.frag");
+        assert_eq!(
+            frag_names.len(),
+            15,
+            "expected 15 uniforms in glass_composite.frag"
+        );
 
         let mut wgsl_names = wgsl_struct_field_names(COMPOSITE_WGSL);
         wgsl_names.extend(wgsl_binding_names(COMPOSITE_WGSL));
 
-        let missing: Vec<&String> = frag_names.iter().filter(|n| !wgsl_names.contains(n)).collect();
+        let missing: Vec<&String> = frag_names
+            .iter()
+            .filter(|n| !wgsl_names.contains(n))
+            .collect();
         assert!(
             missing.is_empty(),
             "glass_composite.wgsl is missing {missing:?}, which glass_composite.frag declares. \
@@ -183,7 +190,9 @@ mod tests {
             "luma weights must match the frag's Rec. 709 coefficients"
         );
 
-        let tinted_at = COMPOSITE_WGSL.find("let tinted").expect("must compute `tinted`");
+        let tinted_at = COMPOSITE_WGSL
+            .find("let tinted")
+            .expect("must compute `tinted`");
         let saturation_at = COMPOSITE_WGSL
             .find("optical.saturation")
             .expect("must read optical.saturation");

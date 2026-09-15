@@ -43,3 +43,11 @@ console_error_panic_hook = "0.1"
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
 web-sys = { version = "0.3", features = ["CanvasRenderingContext2d"] }
+
+# Target-gated the other way from the block above: only a host `cargo test` can run
+# `tests/wgsl_shaders.rs`, and gating keeps `wasm-pack test` from building a shader compiler for
+# wasm32 to run a file that is `#![cfg(not(target_arch = "wasm32"))]` anyway.
+#
+# Dev-dependencies are never linked into the `cdylib`, so this adds nothing to the wasm bundle.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+naga = { version = "30", default-features = false, features = ["wgsl-in"] }
