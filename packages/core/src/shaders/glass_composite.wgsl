@@ -13,40 +13,46 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-struct OpticalUniforms {
-    ior: f32,
-    blur_radius: f32,
-    dispersion: f32,
-    rim_power: f32,
-    sheen_intensity: f32,
-    light_angle: f32,
-    roughness: f32,
-    // Luma-preserving chroma scale applied after the tint mix. 1.0 leaves the backdrop's
-    // saturation untouched; the CSS fallback's `saturate(180%)` is why the default is not 1.0.
-    saturation: f32,
-    // Multiplicative exposure gain applied after the saturation clamp and before the additive
-    // sheen. Buys back the luma the CSS-to-GPU handover drops when its overlay goes from alpha
-    // 0.22 to 0.05 — a gain rather than more white tint, because a veil at alpha `a` scales
-    // per-pixel channel spread by `1 - a` while a gain scales it by `g`, and the composite is
-    // short on chroma as well as luma.
-    brightness: f32,
-    thickness: f32,
-    curvature: f32,
-    // With saturation/brightness above, the struct is now 11 scalars + this padding = 48 bytes,
-    // so tint_color lands at offset 48 with no implicit gap before it.
-    padding: f32,
-    tint_color: vec4<f32>,
-    resolution: vec2<f32>,
-    glass_bounds: vec4<f32>, // x, y, width, height in normalized UV space
-    corner_radius: f32,
-    padding2: vec3<f32>,
+// The one uniform block this pass binds. Its layout is owned by `GlassCompositeUniforms` in
+// packages/core/src/renderer/uniforms.rs, which is `#[repr(C, align(16))]` + `bytemuck::Pod` and
+// asserts every offset below at compile time; `test_composite_uniforms_match_the_wgsl_declaration`
+// parses this declaration and pins the two field-for-field, because nothing here is compiled yet.
+//
+// The order is the layout. Twelve scalars fill three complete 16-byte rows (bytes 0-47), so the two
+// `vec4<f32>` members land on their 16-byte boundaries with no *implicit* padding anywhere in the
+// struct — which the previous `padding: f32` slot did not achieve: with nine scalars ahead of it, it
+// sat at offset 36 and WGSL still inserted 8 unnamed bytes before `tint_color`, putting it at 48
+// rather than the intended 40. Do not append a field without deciding its slot in `uniforms.rs` first.
+struct GlassCompositeUniforms {
+    ior: f32,             //  0
+    blur_radius: f32,     //  4
+    dispersion: f32,      //  8
+    rim_power: f32,       // 12
+    sheen_intensity: f32, // 16
+    light_angle: f32,     // 20
+    roughness: f32,       // 24
+    // Luma-preserving chroma scale applied after the tint mix. 1.0 leaves the backdrop's saturation
+    // untouched; the CSS fallback's `saturate(180%)` is why the default is not 1.0.
+    saturation: f32,      // 28
+    // Multiplicative exposure gain applied after the saturation clamp and before the additive sheen.
+    // Buys back the luma the CSS-to-GPU handover drops when its overlay goes from alpha 0.22 to 0.05 —
+    // a gain rather than more white tint, because a veil at alpha `a` scales per-pixel channel spread
+    // by `1 - a` while a gain scales it by `g`, and the composite is short on chroma as well as luma.
+    brightness: f32,      // 32
+    thickness: f32,       // 36
+    curvature: f32,       // 40
+    corner_radius: f32,   // 44
+    tint_color: vec4<f32>,   // 48
+    glass_bounds: vec4<f32>, // 64 — x, y, width, height in normalized UV space
+    resolution: vec2<f32>,   // 80
+    _padding: vec2<f32>,     // 88 — explicit tail to the 96-byte stride WGSL rounds the block up to
 };
 
 // Effective optical depth of the backdrop behind the rear face, as a multiple of the panel's
 // half-height. Mirrors `BODY_LENS_DEPTH_SCALE` in packages/core/src/optical/physics.rs.
 const BODY_LENS_DEPTH_SCALE: f32 = 1.2;
 
-@group(0) @binding(0) var<uniform> optical: OpticalUniforms;
+@group(0) @binding(0) var<uniform> optical: GlassCompositeUniforms;
 @group(0) @binding(1) var blurred_texture: texture_2d<f32>;
 @group(0) @binding(2) var texture_sampler: sampler;
 
@@ -186,14 +192,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Final composition with glass tint
     let tinted = mix(refracted_color, optical.tint_color.rgb, optical.tint_color.a);
-    // CSS `saturate(N%)` is a luma-preserving chroma scale, and the fallback literals all use
-    // 180-190%. The clamp matters: `mix` with a factor above 1.0 extrapolates and can drive a
-    // channel out of [0, 1] before the additive sheen ever lands on it.
+    // CSS `saturate(N%)` is a luma-preserving chroma scale, and the fallback literals all use 180-190%.
+    // Without this the composite is strictly less saturated than the CSS it replaces: the tint mix above
+    // pulls 12% white *in*, and the blur below averages chroma out.
     let luma = dot(tinted, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let saturated = clamp(mix(vec3<f32>(luma), tinted, optical.saturation), 0.0, 1.0);
-    // Buys back the luma the handover drops when the CSS overlay goes from alpha 0.22 to 0.05.
-    // Before the sheen: the sheen is additive, so scaling it would blow highlights.
-    let brightened = clamp(saturated * optical.brightness, 0.0, 1.0);
+    // The clamp matters: `mix` with a factor above 1.0 extrapolates and can drive a channel out of
+    // [0, 1] before the additive sheen ever lands on it.
+    let saturated = clamp(mix(vec3<f32>(luma), tinted, optical.saturation), vec3<f32>(0.0), vec3<f32>(1.0));
+    // The CSS fallback's brightness came from a near-white overlay at alpha 0.22 that the handover
+    // drops to 0.05. Buying that luma back with more white tint would cost chroma (a veil scales
+    // per-pixel channel spread by 1 - a); a gain scales spread by g instead, which is the direction
+    // the chroma gap needs. Before the sheen: the sheen is additive, so scaling it blows highlights.
+    //
+    // Both clamps take `vec3<f32>` bounds, not the scalar `0.0, 1.0` the GLSL sibling uses: WGSL's
+    // `clamp` requires all three arguments to be the same type, where GLSL overloads it for a vector
+    // value with scalar bounds. Nothing compiles this file, so the scalar spelling would have gone
+    // unnoticed until the first naga validation.
+    let brightened = clamp(saturated * optical.brightness, vec3<f32>(0.0), vec3<f32>(1.0));
     let final_rgb = brightened + vec3<f32>(fresnel) + vec3<f32>(specular + border_light + inner_bevel_light);
 
     return vec4<f32>(final_rgb, alpha);

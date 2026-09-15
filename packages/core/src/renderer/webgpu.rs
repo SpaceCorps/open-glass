@@ -61,11 +61,18 @@ mod tests {
             .collect()
     }
 
-    /// Field names declared inside `struct OpticalUniforms { ... }`.
+    /// Field names declared inside `struct GlassCompositeUniforms { ... }`.
+    ///
+    /// The block was called `OpticalUniforms` until its layout was pinned to
+    /// [`super::uniforms::GlassCompositeUniforms`], which is the Rust struct it must match byte for
+    /// byte. This test and its sibling below check a different axis to
+    /// `test_composite_uniforms_match_the_wgsl_declaration` over there: that one pins the WGSL against
+    /// the *Rust* struct's fields and offsets, these two pin its *parameter surface* against the GLSL
+    /// composite, so a term added to one shader and not the other is caught either way round.
     fn wgsl_struct_field_names(src: &str) -> Vec<String> {
         let struct_start = src
-            .find("struct OpticalUniforms")
-            .expect("glass_composite.wgsl must declare OpticalUniforms");
+            .find("struct GlassCompositeUniforms")
+            .expect("glass_composite.wgsl must declare GlassCompositeUniforms");
         let brace_start = src[struct_start..].find('{').unwrap() + struct_start;
         let brace_end = src[brace_start..].find('}').unwrap() + brace_start;
         src[brace_start + 1..brace_end]
@@ -122,8 +129,10 @@ mod tests {
         // - `optical`: the uniform block variable itself; GLSL has no block.
         // - `texture_sampler`: GLSL folds the sampler into `sampler2D u_blurred_texture`.
         // - `blur_radius`: mirrors `OpticalParams`; consumed by the Kawase passes, not the composite.
-        // - `padding`, `padding2`: std140 alignment slots.
-        const ALLOWLIST: [&str; 5] = ["optical", "texture_sampler", "blur_radius", "padding", "padding2"];
+        // - `_padding`: the block's explicit tail to the 96-byte stride WGSL rounds it up to. It
+        //   replaced the earlier `padding` / `padding2` pair, whose offsets did not do what their
+        //   names suggested — see `super::uniforms::GlassCompositeUniforms`.
+        const ALLOWLIST: [&str; 4] = ["optical", "texture_sampler", "blur_radius", "_padding"];
 
         let frag_names = frag_uniform_names(COMPOSITE_FRAG);
         let mut wgsl_names = wgsl_struct_field_names(COMPOSITE_WGSL);
