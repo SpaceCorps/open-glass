@@ -22,7 +22,7 @@ Pre-alpha. This section is the source of truth for what is real — the rest of 
 ### Not implemented yet
 
 - **The WebGPU backend.** `WebGpuRenderer::new` in `packages/core/src/renderer/webgpu.rs` deliberately fails at construction (`Err("WebGPU backend not yet implemented")`) so that `RendererBackend::Auto` falls back to the WebGL2 renderer; its `GlassRenderer` impl is therefore never reached. Because of that, `negotiateBackend()` reports `"webgl2"` even on a browser whose `navigator.gpu.requestAdapter()` resolves: reporting `"webgpu"` would label a live WebGL2 renderer as something it is not.
-- **The WGSL shaders are not wired up.** `packages/core/src/shaders/` holds `glass_composite.wgsl`, `kawase_down.wgsl` and `kawase_up.wgsl` for that backend; no code reads them yet. (The GLSL siblings `kawase_blur.frag` and `glass_composite.frag` _are_ compiled, by the WebGL2 renderer via `include_str!`.)
+- **The WGSL shaders are not wired up.** `packages/core/src/shaders/` holds `glass_composite.wgsl`, `kawase_down.wgsl` and `kawase_up.wgsl` for that backend; no code reads them yet. (The GLSL siblings `kawase_blur.frag` and `glass_composite.frag` _are_ compiled, by the WebGL2 renderer via `include_str!`.) `kawase_down.wgsl` and `kawase_up.wgsl` each carry their own `KAWASE_STEP_SCALE` const, held equal to `physics.rs`'s by a Rust source-text test (`renderer::webgpu`'s `test_wgsl_blur_shaders_use_the_calibrated_step_scale`) rather than by the pipeline reading it — so a future recalibration of the blur has three places to update, not two: `physics.rs` and both WGSL files.
 
 #### Uniform buffer layout
 
