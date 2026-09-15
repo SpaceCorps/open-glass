@@ -61,7 +61,44 @@ impl WasmGlassEngine {
         self.renderer.has_real_background()
     }
 
-    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into the background texture.
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` into one depth band.
+    ///
+    /// `band` is 0-based and ordered far to near; `depth` is the distance in pixels from the glass rear
+    /// face to that content, or `max_backdrop_bands`' companion `AUTO_BACKDROP_DEPTH` (-1) for "unknown",
+    /// which falls back to the calibrated depth derived from the panel's own size.
+    #[wasm_bindgen]
+    pub fn set_band_from_canvas(
+        &mut self,
+        band: u32,
+        canvas: HtmlCanvasElement,
+        depth: f32,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .set_band_from_canvas(band, &canvas, depth)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// [`Self::set_band_from_canvas`] from an `OffscreenCanvas`.
+    #[wasm_bindgen]
+    pub fn set_band_from_offscreen_canvas(
+        &mut self,
+        band: u32,
+        canvas: OffscreenCanvas,
+        depth: f32,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .set_band_from_offscreen_canvas(band, &canvas, depth)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Stop sampling bands `first` and nearer, so an unmounted content layer's stale raster cannot keep
+    /// being refracted.
+    #[wasm_bindgen]
+    pub fn release_bands_from(&mut self, first: u32) {
+        self.renderer.release_bands_from(first);
+    }
+
+    /// Upload a rasterized DOM backdrop from an `HTMLCanvasElement` as the sole backdrop band.
     #[wasm_bindgen]
     pub fn set_background_from_canvas(&mut self, canvas: HtmlCanvasElement) -> Result<(), JsValue> {
         self.renderer
@@ -69,7 +106,7 @@ impl WasmGlassEngine {
             .map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` into the background texture.
+    /// Upload a rasterized DOM backdrop from an `OffscreenCanvas` as the sole backdrop band.
     #[wasm_bindgen]
     pub fn set_background_from_offscreen_canvas(
         &mut self,
@@ -153,6 +190,15 @@ impl WasmGlassEngine {
     pub fn backend_name(&self) -> String {
         self.renderer.backend_name().to_string()
     }
+}
+
+/// How many depth bands the backdrop can be split into.
+///
+/// The TypeScript facade re-exports this rather than hard-coding 3, so the band assignment on the
+/// capture side cannot disagree with the number of samplers the shader declares.
+#[wasm_bindgen]
+pub fn max_backdrop_bands() -> u32 {
+    renderer::webgl2::MAX_BACKDROP_BANDS as u32
 }
 
 /// Helper function to calculate Fresnel reflectance using Schlick's approximation.
