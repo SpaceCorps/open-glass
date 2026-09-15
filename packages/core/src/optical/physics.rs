@@ -1,6 +1,12 @@
 use glam::{Vec2, Vec3};
 
 /// Optical parameters configuring the physical appearance of Apple Glass.
+///
+/// This is the ergonomic API type and carries no GPU layout obligation: `align_of` is 4 and the size
+/// is whatever the fields add up to. The uniform buffer layout the composite binds is owned by
+/// [`crate::renderer::uniforms::GlassCompositeUniforms`], and a field added here must be plumbed
+/// through its `from_quad`, which destructures this struct exhaustively and therefore will not compile
+/// until it is.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct OpticalParams {
@@ -20,9 +26,6 @@ pub struct OpticalParams {
     pub roughness: f32,
     /// Luma-preserving chroma scale applied after the tint mix. `1.0` leaves the backdrop's
     /// saturation untouched.
-    ///
-    /// This occupies the slot that used to be reserved padding, so the `#[repr(C)]` layout and the
-    /// 16-byte boundary before [`Self::tint_color`] are unchanged.
     pub saturation: f32,
     /// Multiplicative exposure gain applied to the composite after the saturation clamp and before
     /// the additive sheen. `1.0` leaves the composite as the blur chain produced it.
@@ -35,10 +38,6 @@ pub struct OpticalParams {
     /// (measured mean luma 110.2 vs 158.0, mean channel spread 19.1 vs 40.1), so only the gain closes
     /// both at once — keeping the 0.22 veil instead would have reached luma 145 while dropping the
     /// spread to ~15.6.
-    ///
-    /// Note for the unimplemented WebGPU path: this field takes `OpticalParams` from 48 to 52 bytes
-    /// with no padding slot left. The WebGL2 upload is per-field `uniform1f`, so nothing depends on a
-    /// 16-byte multiple today, but a `std140`/`std430` buffer upload will need explicit padding.
     pub brightness: f32,
     /// Physical thickness of the glass slab in pixels: the distance the refracted ray travels between
     /// the front/top entrance interface and the rear/bottom exit interface.
@@ -536,17 +535,13 @@ mod tests {
         assert!(OpticalParams::default().brightness > 1.0);
     }
 
-    #[test]
-    fn test_optical_params_layout_matches_the_uniform_upload() {
-        // 7 leading f32 + saturation + brightness + thickness + curvature + a 4-float tint = 60 bytes.
-        // The point is that the layout the GPU uniform upload assumes is pinned, not that the number
-        // never changes: `brightness` grew it from 48 to 52 and took the last reserved padding slot,
-        // and the dual-surface pair grew it from 52 to 60. Safe today only because the WebGL2 composite
-        // uploads per field (`uniform1f`) rather than memcpying the struct into a std140 buffer — a
-        // std140/std430 upload would need 4 bytes of explicit tail padding to reach a 16-byte multiple.
-        assert_eq!(std::mem::size_of::<OpticalParams>(), 60);
-        assert_eq!(std::mem::align_of::<OpticalParams>(), 4);
-    }
+    // `test_optical_params_layout_matches_the_uniform_upload` used to live here, asserting
+    // `size_of::<OpticalParams>() == 60`. It was deleted rather than updated: the struct grew three
+    // times (48 -> 52 -> 60) and the only effect each time was that this number was edited to match,
+    // which is not a gate. The layout that actually reaches a GPU buffer is
+    // `renderer::uniforms::GlassCompositeUniforms`, pinned by compile-time offset assertions and by
+    // `from_quad`'s exhaustive destructure of this struct. Keeping a second, weaker size assertion here
+    // would only invite the next plan to edit a number instead of deciding a slot.
 
     #[test]
     fn test_default_thickness_and_curvature() {
