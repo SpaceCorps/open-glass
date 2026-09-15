@@ -488,6 +488,38 @@ describe("GlassProvider depth bands", () => {
     expect(destroy).toHaveBeenCalledTimes(2);
   });
 
+  it("gives the backdrop back when DOM capture is switched off", async () => {
+    const engine = mockEngine();
+    vi.spyOn(core, "createGlassEngine").mockResolvedValue(engine as unknown as core.GlassEngine);
+    stubBandCanvases();
+    stubCaptures();
+    stubLayerRects();
+    const tick = stubAnimationFrames();
+
+    const Scene: React.FC<{ capture: boolean }> = ({ capture }) => (
+      <GlassProvider captureUnderlying={capture}>
+        <GlassUnderlying data-testid="far" depth={480}>
+          <p>Wallpaper</p>
+        </GlassUnderlying>
+      </GlassProvider>
+    );
+
+    const view = render(<Scene capture />);
+    await act(async () => {});
+    await tick();
+    await tick();
+    expect(engine.updateBackdropBand).toHaveBeenCalled();
+
+    await act(async () => {
+      view.rerender(<Scene capture={false} />);
+    });
+    await tick();
+
+    // Without this the engine keeps its last upload, `has_real_background()` stays true, and every
+    // panel goes on refracting a frozen frame instead of handing back to the CSS fallback.
+    expect(engine.releaseBackdropBandsFrom).toHaveBeenLastCalledWith(0);
+  });
+
   it("clears every layer when registerUnderlying is passed null", async () => {
     const engine = mockEngine();
     vi.spyOn(core, "createGlassEngine").mockResolvedValue(engine as unknown as core.GlassEngine);
