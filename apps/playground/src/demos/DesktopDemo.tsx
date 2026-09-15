@@ -12,9 +12,14 @@ import {
 
 export interface DesktopDemoProps {
   optical: Required<OpticalParams>;
+  /** Depth of the floating-card layer, in pixels behind the glass. The document sits at 480. */
+  nearBandDepth: number;
 }
 
-export const DesktopDemo: React.FC<DesktopDemoProps> = ({ optical }) => {
+/** Pixels behind the glass for the document layer: the far band, and the reference for the near one. */
+const DOCUMENT_BAND_DEPTH = 480;
+
+export const DesktopDemo: React.FC<DesktopDemoProps> = ({ optical, nearBandDepth }) => {
   const [windowOpen, setWindowOpen] = useState(true);
   const [windowPos, setWindowPos] = useState({ x: 120, y: 110 });
   const [counter, setCounter] = useState(42);
@@ -152,8 +157,9 @@ export const DesktopDemo: React.FC<DesktopDemoProps> = ({ optical }) => {
 
       {/* Desktop Workspace with Underlying Document and Floating Glass */}
       <div style={{ position: "relative", flex: 1, padding: "1.5rem", overflow: "hidden" }}>
-        {/* Rich Underlying Document Layer to be captured and refracted */}
+        {/* Rich Underlying Document Layer to be captured and refracted, at the far band */}
         <GlassUnderlying
+          depth={DOCUMENT_BAND_DEPTH}
           style={{
             position: "absolute",
             inset: "1.5rem",
@@ -440,6 +446,51 @@ export const DesktopDemo: React.FC<DesktopDemoProps> = ({ optical }) => {
               </div>
             </div>
           </div>
+        </GlassUnderlying>
+
+        {/*
+          Near band: cards sitting just under the glass, laid across the path the window is dragged
+          along. Both layers are refracted by the same panel at the same time, so dragging the window
+          across them shows the parallax directly — these shift by a fraction of what the document
+          behind them does, because they are a fraction of its distance away.
+        */}
+        <GlassUnderlying
+          depth={nearBandDepth}
+          style={{
+            position: "absolute",
+            left: "3.5rem",
+            right: "3.5rem",
+            top: "210px",
+            display: "flex",
+            gap: "16px",
+            pointerEvents: "none",
+          }}
+        >
+          {[
+            { label: "Now Playing", value: "Kawase Mix", accent: "#f472b6" },
+            { label: "Depth", value: `${nearBandDepth}px`, accent: "#38bdf8" },
+            { label: "Far Band", value: `${DOCUMENT_BAND_DEPTH}px`, accent: "#a78bfa" },
+          ].map((card) => (
+            <div
+              key={card.label}
+              style={{
+                flex: 1,
+                padding: "0.75rem 0.9rem",
+                borderRadius: "14px",
+                background: "rgba(255, 255, 255, 0.16)",
+                border: `1px solid ${card.accent}`,
+                boxShadow: `0 12px 30px rgba(0, 0, 0, 0.45)`,
+                color: "#f8fafc",
+              }}
+            >
+              <div style={{ fontSize: "0.7rem", opacity: 0.75, letterSpacing: "0.06em" }}>
+                {card.label.toUpperCase()}
+              </div>
+              <div style={{ fontSize: "1.05rem", fontWeight: 700, color: card.accent }}>
+                {card.value}
+              </div>
+            </div>
+          ))}
         </GlassUnderlying>
 
         {/* Floating Interactive Glass Window */}

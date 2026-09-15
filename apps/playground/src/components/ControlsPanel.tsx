@@ -9,6 +9,8 @@ export interface ControlsPanelProps {
   onCaptureEnabledChange?: (enabled: boolean) => void;
   captureFps?: number;
   onCaptureFpsChange?: (fps: number) => void;
+  nearBandDepth?: number;
+  onNearBandDepthChange?: (depth: number) => void;
 }
 
 export const ControlsPanel: React.FC<ControlsPanelProps> = ({
@@ -19,6 +21,8 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
   onCaptureEnabledChange,
   captureFps = 30,
   onCaptureFpsChange,
+  nearBandDepth = 80,
+  onNearBandDepthChange,
 }) => {
   const update = <K extends keyof OpticalParams>(key: K, value: OpticalParams[K]) => {
     onChange({
@@ -117,6 +121,27 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
               onChange={(e) => onCaptureFpsChange?.(Number(e.target.value))}
               style={{ width: "100%" }}
             />
+          </div>
+
+          {/* How far behind the glass the floating-card layer sits. The document layer is at 480px, so
+              dragging a panel across both at once is what makes the parallax difference visible. */}
+          <div style={{ marginTop: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+              <span>Near Band Depth</span>
+              <span style={{ fontFamily: "monospace" }}>{nearBandDepth}px</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="600"
+              step="20"
+              value={nearBandDepth}
+              onChange={(e) => onNearBandDepthChange?.(Number(e.target.value))}
+              style={{ width: "100%" }}
+            />
+            <div style={{ fontSize: "0.6875rem", color: "#888", marginTop: "2px" }}>
+              0px At the glass · 80px Floating card · 480px Wallpaper
+            </div>
           </div>
         </div>
 
