@@ -1,3 +1,4 @@
+use super::uniforms::GlassCompositeUniforms;
 use super::{GlassQuad, GlassRenderer};
 use crate::optical::physics;
 use wasm_bindgen::{JsCast, JsValue};
@@ -196,22 +197,6 @@ fn blur_groups(quads: &[GlassQuad]) -> Vec<(f32, Vec<usize>)> {
     }
 
     groups
-}
-
-/// Quad rect in normalized UV space, as `u_glass_bounds` expects (`x, y, width, height`).
-///
-/// `quad.y` arrives as a top-down `getBoundingClientRect` pixel offset, while `u_glass_bounds` is
-/// consumed as bottom-up UV by `glass_composite.frag`, so the y origin is flipped here: a quad
-/// 50px from the top of a 400px canvas sits at `1.0 - (50 + height) / 400` in UV space.
-fn normalized_glass_bounds(quad: &GlassQuad, width: u32, height: u32) -> [f32; 4] {
-    let w = width.max(1) as f32;
-    let h = height.max(1) as f32;
-    [
-        quad.x / w,
-        (h - quad.y - quad.height) / h,
-        quad.width / w,
-        quad.height / h,
-    ]
 }
 
 /// Compile a single shader stage, surfacing the driver's info log on failure.
@@ -696,35 +681,36 @@ impl WebGl2Renderer {
 
         let uniforms = &self.composite_uniforms;
         for quad in indices.iter().filter_map(|&index| self.quads.get(index)) {
-            let bounds = normalized_glass_bounds(quad, self.width, self.height);
+            // Sourced from the WebGPU-facing uniform block rather than from `quad.optical` directly,
+            // so the layout owner has a consumer in the backend that actually ships: an optical field
+            // left out of `GlassCompositeUniforms::from_quad` stops reaching this shader too, instead
+            // of only mattering on a code path nothing runs yet. The GL calls, their order and their
+            // values are unchanged, so the composite output is pixel-identical.
+            let u = GlassCompositeUniforms::from_quad(quad, self.width, self.height);
             gl.uniform4f(
                 uniforms.glass_bounds.as_ref(),
-                bounds[0],
-                bounds[1],
-                bounds[2],
-                bounds[3],
+                u.glass_bounds[0],
+                u.glass_bounds[1],
+                u.glass_bounds[2],
+                u.glass_bounds[3],
             );
-            gl.uniform1f(uniforms.corner_radius.as_ref(), quad.corner_radius);
-            gl.uniform1f(uniforms.ior.as_ref(), quad.optical.ior);
-            gl.uniform1f(uniforms.dispersion.as_ref(), quad.optical.dispersion);
-            gl.uniform1f(uniforms.rim_power.as_ref(), quad.optical.rim_power);
-            gl.uniform1f(
-                uniforms.sheen_intensity.as_ref(),
-                quad.optical.sheen_intensity,
-            );
-            gl.uniform1f(uniforms.light_angle.as_ref(), quad.optical.light_angle);
-            gl.uniform1f(uniforms.roughness.as_ref(), quad.optical.roughness);
-            gl.uniform1f(uniforms.saturation.as_ref(), quad.optical.saturation);
-            gl.uniform1f(uniforms.brightness.as_ref(), quad.optical.brightness);
-            gl.uniform1f(uniforms.thickness.as_ref(), quad.optical.thickness);
-            gl.uniform1f(uniforms.curvature.as_ref(), quad.optical.curvature);
-            let tint = quad.optical.tint_color;
+            gl.uniform1f(uniforms.corner_radius.as_ref(), u.corner_radius);
+            gl.uniform1f(uniforms.ior.as_ref(), u.ior);
+            gl.uniform1f(uniforms.dispersion.as_ref(), u.dispersion);
+            gl.uniform1f(uniforms.rim_power.as_ref(), u.rim_power);
+            gl.uniform1f(uniforms.sheen_intensity.as_ref(), u.sheen_intensity);
+            gl.uniform1f(uniforms.light_angle.as_ref(), u.light_angle);
+            gl.uniform1f(uniforms.roughness.as_ref(), u.roughness);
+            gl.uniform1f(uniforms.saturation.as_ref(), u.saturation);
+            gl.uniform1f(uniforms.brightness.as_ref(), u.brightness);
+            gl.uniform1f(uniforms.thickness.as_ref(), u.thickness);
+            gl.uniform1f(uniforms.curvature.as_ref(), u.curvature);
             gl.uniform4f(
                 uniforms.tint_color.as_ref(),
-                tint[0],
-                tint[1],
-                tint[2],
-                tint[3],
+                u.tint_color[0],
+                u.tint_color[1],
+                u.tint_color[2],
+                u.tint_color[3],
             );
             gl.draw_arrays(Gl::TRIANGLES, 0, 3);
         }
@@ -1095,52 +1081,6 @@ mod tests {
         assert!(blur_groups(&[]).is_empty());
     }
 
-    #[test]
-    fn test_normalized_glass_bounds_flips_dom_y_to_uv_y() {
-        let quad = GlassQuad {
-            x: 100.0,
-            y: 50.0,
-            width: 400.0,
-            height: 200.0,
-            ..GlassQuad::default()
-        };
-        // 50px from the DOM top of a 400px canvas leaves 150px below it: (400 - 50 - 200) / 400.
-        let bounds = normalized_glass_bounds(&quad, 800, 400);
-        assert_eq!(bounds, [0.125, 0.375, 0.5, 0.5]);
-    }
-
-    #[test]
-    fn test_normalized_glass_bounds_pins_flip_direction_for_asymmetric_rect() {
-        // Near the top of a tall canvas: the un-flipped math would give y = 0.05, the flipped
-        // math y = 0.85, so this case fails loudly if the flip is dropped or applied twice.
-        let quad = GlassQuad {
-            x: 40.0,
-            y: 50.0,
-            width: 100.0,
-            height: 100.0,
-            ..GlassQuad::default()
-        };
-        let bounds = normalized_glass_bounds(&quad, 200, 1000);
-        assert!(
-            (bounds[0] - 0.2).abs() < 1e-6,
-            "x is not flipped: {bounds:?}"
-        );
-        assert!(
-            (bounds[1] - 0.85).abs() < 1e-6,
-            "y flip is wrong: {bounds:?}"
-        );
-        assert!((bounds[2] - 0.5).abs() < 1e-6);
-        assert!((bounds[3] - 0.1).abs() < 1e-6);
-        // The top edge in UV space is the bottom edge in DOM space.
-        assert!(bounds[1] + bounds[3] > 0.5, "quad landed in the lower half");
-    }
-
-    #[test]
-    fn test_normalized_glass_bounds_guards_zero_dimensions() {
-        let quad = GlassQuad::default();
-        let bounds = normalized_glass_bounds(&quad, 0, 0);
-        assert!(bounds.iter().all(|value| value.is_finite()));
-        // width/height clamp to 1, so the flip reduces to 1 - y - height on a unit canvas.
-        assert_eq!(bounds[1], 1.0 - quad.y - quad.height);
-    }
+    // The `normalized_glass_bounds` tests moved to `renderer::uniforms` with the function itself, so
+    // the UV flip has one definition and one test suite for both backends.
 }

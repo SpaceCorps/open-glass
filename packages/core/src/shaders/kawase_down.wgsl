@@ -14,11 +14,22 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// The one uniform block this pass binds. Its layout is owned by `KawaseDownsampleUniforms` in
+// packages/core/src/renderer/uniforms.rs, which is `#[repr(C, align(16))]` + `bytemuck::Pod` and
+// asserts every offset below at compile time;
+// `test_kawase_downsample_uniforms_match_the_wgsl_declaration` parses this declaration and pins
+// the three field-for-field, because nothing here is compiled yet. Do not append a field without
+// deciding its slot in `uniforms.rs` first.
 struct DownsampleUniforms {
     texel_size: vec2<f32>,
     iteration: f32,
     blur_radius: f32,
 };
+
+/// Per-level tap step scale. Must equal `physics::KAWASE_STEP_SCALE`; the WGSL is not compiled by
+/// anything yet, so `test_wgsl_blur_shaders_use_the_calibrated_step_scale` in `renderer::webgpu` is
+/// what keeps the two in step.
+const KAWASE_STEP_SCALE: f32 = 0.20;
 
 @group(0) @binding(0) var<uniform> uniforms: DownsampleUniforms;
 @group(0) @binding(1) var source_texture: texture_2d<f32>;
@@ -26,8 +37,8 @@ struct DownsampleUniforms {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let step = (uniforms.iteration + 1.0) * max(uniforms.blur_radius * 0.25, 1.0);
-    let offset = uniforms.texel_size * step * 0.5;
+    let step = (uniforms.iteration + 1.0) * max(uniforms.blur_radius * KAWASE_STEP_SCALE, 1.0);
+    let offset = uniforms.texel_size * step;
 
     var color = textureSample(source_texture, texture_sampler, in.uv + vec2<f32>(-offset.x, -offset.y));
     color += textureSample(source_texture, texture_sampler, in.uv + vec2<f32>(offset.x, -offset.y));

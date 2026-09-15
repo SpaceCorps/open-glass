@@ -42,6 +42,9 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --workspace
 
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
       - name: Run Rust Clippy
         run: cargo clippy --workspace -- -D warnings
 

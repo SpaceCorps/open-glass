@@ -1,3 +1,4 @@
+pub mod uniforms;
 pub mod webgl2;
 pub mod webgpu;
 
@@ -5,6 +6,11 @@ use crate::optical::physics::OpticalParams;
 use wasm_bindgen::prelude::*;
 
 /// Representation of a glass UI element quad submitted to the GPU.
+///
+/// This is a CPU-side batch element, iterated per frame rather than uploaded, so its layout is
+/// deliberately not a std140 one. The uniform buffer layout lives in
+/// [`uniforms::GlassCompositeUniforms`], and a field added here has to be plumbed through
+/// [`uniforms::GlassCompositeUniforms::from_quad`], which will not compile until it is.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlassQuad {
