@@ -41,9 +41,12 @@ impl GlassRenderer for WebGpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::optical::physics;
 
     const COMPOSITE_WGSL: &str = include_str!("../shaders/glass_composite.wgsl");
     const COMPOSITE_FRAG: &str = include_str!("../shaders/glass_composite.frag");
+    const KAWASE_DOWN_WGSL: &str = include_str!("../shaders/kawase_down.wgsl");
+    const KAWASE_UP_WGSL: &str = include_str!("../shaders/kawase_up.wgsl");
 
     /// Every `uniform <type> u_name;` declaration in the frag, with the `u_` prefix stripped.
     fn frag_uniform_names(src: &str) -> Vec<String> {
@@ -105,6 +108,22 @@ mod tests {
                 after_var.split(':').next().map(|s| s.trim().to_string())
             })
             .collect()
+    }
+
+    /// Parses `const <name>: f32 = <value>;` from a WGSL source at module scope.
+    fn wgsl_f32_const(src: &str, name: &str) -> f32 {
+        let needle = format!("const {name}: f32 =");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("expected `{needle}` declaration in WGSL source"));
+        let value = src[start + needle.len()..]
+            .split(';')
+            .next()
+            .unwrap_or_else(|| panic!("`{needle}` declaration is never terminated with `;`"))
+            .trim();
+        value
+            .parse::<f32>()
+            .unwrap_or_else(|_| panic!("`{needle}` value `{value}` is not a valid f32"))
     }
 
     #[test]
@@ -209,5 +228,118 @@ mod tests {
         assert!(renderer.update_quads(&[GlassQuad::default()]).is_ok());
         assert_eq!(renderer.quads.len(), 1);
         assert!(renderer.render().is_ok());
+    }
+
+    #[test]
+    fn test_wgsl_blur_shaders_use_the_calibrated_step_scale() {
+        for (name, src) in [
+            ("kawase_down.wgsl", KAWASE_DOWN_WGSL),
+            ("kawase_up.wgsl", KAWASE_UP_WGSL),
+        ] {
+            let scale = wgsl_f32_const(src, "KAWASE_STEP_SCALE");
+            assert_eq!(
+                scale,
+                physics::KAWASE_STEP_SCALE,
+                "{name}'s KAWASE_STEP_SCALE ({scale}) does not match physics::KAWASE_STEP_SCALE \
+                 ({}); the scale is calibrated in physics.rs and changing it in one place only \
+                 reintroduces the WebGL2/WebGPU sigma split",
+                physics::KAWASE_STEP_SCALE
+            );
+
+            let step_line = src
+                .lines()
+                .find(|line| line.trim_start().starts_with("let step ="))
+                .unwrap_or_else(|| panic!("{name} has no `let step =` line"));
+            assert!(
+                !step_line.contains("0.25"),
+                "{name}'s step expression still contains the stale literal 0.25: {step_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wgsl_blur_step_expressions_match_the_cpu_kernels() {
+        assert!(
+            KAWASE_DOWN_WGSL.contains(
+                "(uniforms.iteration + 1.0) * max(uniforms.blur_radius * KAWASE_STEP_SCALE, 1.0)"
+            ),
+            "kawase_down.wgsl's step expression must match dual_kawase_down_step's shape"
+        );
+        let down_offset_line = KAWASE_DOWN_WGSL
+            .lines()
+            .find(|line| line.trim_start().starts_with("let offset ="))
+            .expect("kawase_down.wgsl has no `let offset =` line");
+        assert_eq!(
+            down_offset_line.trim(),
+            "let offset = uniforms.texel_size * step;",
+            "kawase_down.wgsl's offset must be the full step with no extra factor, matching \
+             dual_kawase_down_offsets and kawase_blur.frag (the name `half_offset` in physics.rs \
+             refers to the diagonal split into 4 taps, not a halved step)"
+        );
+
+        assert!(
+            KAWASE_UP_WGSL.contains(
+                "(uniforms.iteration + 0.5) * max(uniforms.blur_radius * KAWASE_STEP_SCALE, 1.0)"
+            ),
+            "kawase_up.wgsl's step expression must match dual_kawase_up_step's shape"
+        );
+        let up_offset_line = KAWASE_UP_WGSL
+            .lines()
+            .find(|line| line.trim_start().starts_with("let offset ="))
+            .expect("kawase_up.wgsl has no `let offset =` line");
+        assert_eq!(
+            up_offset_line.trim(),
+            "let offset = uniforms.texel_size * step;",
+            "kawase_up.wgsl's offset must carry no extra factor; the tent filter's own inner ring \
+             (`let half_offset = offset * 0.5;`) is a separate, correct line"
+        );
+    }
+
+    #[test]
+    fn test_wgsl_blur_chain_hits_the_css_blur_target() {
+        // Mirrors physics::kawase_pyramid_sigma's variance sum, but driven by the scale parsed out
+        // of kawase_down.wgsl / kawase_up.wgsl rather than physics::KAWASE_STEP_SCALE, so this test
+        // moves when the shader text moves rather than trivially agreeing with itself.
+        //
+        // Before this plan's fix (stale 0.25 scale, extra `* 0.5` on the down offset): 27.99px,
+        // -12.5% against the 32.0px CSS target, outside the +/-10% band. After: 31.71px, -0.9%.
+        let down_scale = wgsl_f32_const(KAWASE_DOWN_WGSL, "KAWASE_STEP_SCALE");
+        let up_scale = wgsl_f32_const(KAWASE_UP_WGSL, "KAWASE_STEP_SCALE");
+
+        let down_step =
+            |iteration: u32, blur_radius: f32| (iteration as f32 + 1.0) * (blur_radius * down_scale).max(1.0);
+        let up_step =
+            |iteration: u32, blur_radius: f32| (iteration as f32 + 0.5) * (blur_radius * up_scale).max(1.0);
+
+        let levels = 5u32;
+        let blur_radius = 16.0f32;
+        let mut variance = 0.0f32;
+        for iteration in 0..levels {
+            let down = down_step(iteration, blur_radius);
+            variance += down * down;
+        }
+        for iteration in 0..levels.saturating_sub(1) {
+            let up = up_step(iteration, blur_radius);
+            variance += up * up;
+        }
+        for level in 0..levels {
+            let box_width = (1u32 << (level + 1)) as f32;
+            variance += 2.0 * box_width * box_width / 12.0;
+        }
+        let sigma = variance.sqrt();
+
+        let expected = physics::kawase_pyramid_sigma(blur_radius, levels);
+        assert!(
+            (sigma - expected).abs() <= 0.01,
+            "WGSL step formulas produce sigma {sigma}px, expected {expected}px matching the \
+             CPU/WebGL2 chain, within 0.01px"
+        );
+
+        let target = physics::CSS_BLUR_PIXELS_PER_RADIUS * blur_radius;
+        assert!(
+            (sigma - target).abs() <= target * 0.10,
+            "WGSL chain sigma at blur_radius {blur_radius} is {sigma}px, outside +/-10% of the \
+             {target}px CSS equivalent"
+        );
     }
 }
