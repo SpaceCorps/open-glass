@@ -35,6 +35,12 @@
 //! overlay the readiness handover removes, which is what made the whole page dim ~780ms after load.
 //! [`the_brightness_term_holds_the_handover_luma`] gates that.
 //!
+//! Bending the light is the fourth. Every assertion above holds for a panel that transmits its
+//! interior straight through and only refracts at its 8px rim, because sampling straight down still
+//! tracks the backdrop underneath and keeps its chroma and luma — which is exactly what the panel body
+//! did before the volumetric lens.
+//! [`the_volumetric_curvature_bends_interior_light`] gates that.
+//!
 //! The whole file is `cfg`'d to `wasm32`, so a host `cargo test --workspace` compiles it to nothing
 //! and reports zero tests for this target rather than failing to build.
 
@@ -145,6 +151,39 @@ fn quadrant_canvas(colors: [&str; 4]) -> HtmlCanvasElement {
     canvas
 }
 
+/// [`MUTED_QUADRANTS`] laid out as a 64px checkerboard rather than four half-canvas blocks, for
+/// [`the_volumetric_curvature_bends_interior_light`].
+///
+/// The quadrant backdrop cannot see the body lens at all: the panel's centre lands exactly on the
+/// quadrant cross, so the only edges in the whole backdrop are the two lines through the panel's own
+/// optical axis — and the lens displaces the sample *along* those lines (radially, in a body_uv space
+/// whose axes are the panel's), leaving the colour it lands on unchanged. A checkerboard puts edges
+/// everywhere and in both directions, so a few pixels of displacement anywhere in the body shows up.
+fn muted_checkerboard() -> HtmlCanvasElement {
+    const CELL: f64 = 64.0;
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let ctx = canvas
+        .get_context("2d")
+        .expect("requesting a 2d context threw")
+        .expect("2d is not available on this canvas")
+        .dyn_into::<CanvasRenderingContext2d>()
+        .expect("the canvas returned a non-2D context");
+
+    let cols = (f64::from(WIDTH) / CELL).ceil() as u32;
+    let rows = (f64::from(HEIGHT) / CELL).ceil() as u32;
+    for row in 0..rows {
+        for col in 0..cols {
+            // Cycling all four colours rather than alternating two keeps every cell boundary a real
+            // colour step in more than one channel.
+            let color = MUTED_QUADRANTS[((row * cols + row + col) % 4) as usize];
+            ctx.set_fill_style_str(color);
+            ctx.fill_rect(f64::from(col) * CELL, f64::from(row) * CELL, CELL, CELL);
+        }
+    }
+
+    canvas
+}
+
 /// A quad inset from every canvas edge, so all four backdrop quadrants sit under the panel interior
 /// while the SDF edge falloff stays well away from the sampled points.
 fn inset_quad() -> GlassQuad {
@@ -219,11 +258,16 @@ fn mean_interior_channel_spread(pixels: &[u8]) -> f64 {
 /// `u_saturation`'s clamp swallows almost all of a boost (measured: spread 218 at saturation 1.0
 /// against 251 at 1.8, a 1.15x ratio for a 1.8x scale — not the 1.3x floor this test needs).
 fn render_backdrop_with(optical: OpticalParams) -> Vec<u8> {
+    render_over(&quadrant_canvas(MUTED_QUADRANTS), optical)
+}
+
+/// [`render_backdrop_with`] over an arbitrary backdrop.
+fn render_over(backdrop: &HtmlCanvasElement, optical: OpticalParams) -> Vec<u8> {
     let canvas = create_canvas(WIDTH, HEIGHT);
     let mut renderer =
         WebGl2Renderer::new(&canvas, WIDTH, HEIGHT).expect("WebGl2Renderer::new failed");
     renderer
-        .set_background_from_canvas(&quadrant_canvas(MUTED_QUADRANTS))
+        .set_background_from_canvas(backdrop)
         .expect("uploading the backdrop failed");
     renderer
         .update_quads(&[inset_quad_with(optical)])
@@ -580,6 +624,95 @@ fn the_brightness_term_holds_the_handover_luma() {
          into a tint channel by the positional add_quad order, or dropped from the shader",
         OpticalParams::default().brightness,
         boosted_luma / neutral_luma
+    );
+}
+
+/// The panel *body* must bend the light it transmits, not only its 8px perimeter.
+///
+/// This is the whole point of the volumetric lens. Before it, `(1 - edge_proximity)` scaled the front
+/// normal to exactly `(0, 0, 1)` everywhere more than `corner_radius` inside the boundary, so
+/// `refract` returned the view ray unchanged and the interior sampled the backdrop it sat directly on
+/// top of — a flat frosted pane with a bevelled rim. Every other pixel test in this file passes under
+/// that behaviour, including the refraction one: sampling straight down still tracks the quadrant
+/// underneath.
+///
+/// So this is a differential: the same frame at `curvature: 0.15, thickness: 15.0` against
+/// `curvature: 0.0, thickness: 0.0`, which reproduces exactly the old flat interior. Sampling only
+/// [`interior_samples`] — 48px in from every edge, twice the 24px `corner_radius` bevel band — keeps
+/// the rim's own refraction, and the inner bevel highlight, out of the comparison, so the difference
+/// can only have come from the body.
+///
+/// Measured, with the lens in place: 220 of the 260 interior samples move, by a mean of 4.09 levels.
+/// With `lens_tilt` forced to zero in the shader — the flat interior — 18 samples move, by a mean of
+/// 0.24, and those 18 are the outermost ring, where the bevel's own tilt still refracts. The
+/// thresholds below sit between the two.
+#[wasm_bindgen_test]
+fn the_volumetric_curvature_bends_interior_light() {
+    let flat_optical = OpticalParams {
+        curvature: 0.0,
+        thickness: 0.0,
+        ..OpticalParams::default()
+    };
+    let curved_optical = OpticalParams {
+        curvature: 0.15,
+        thickness: 15.0,
+        ..OpticalParams::default()
+    };
+
+    let backdrop = muted_checkerboard();
+    let flat = render_over(&backdrop, flat_optical);
+    let flat_again = render_over(&backdrop, flat_optical);
+    let curved = render_over(&backdrop, curved_optical);
+
+    // Largest single-channel difference between two frames at each interior sample.
+    let sample_deltas = |a: &[u8], b: &[u8]| -> Vec<u32> {
+        interior_samples(a)
+            .into_iter()
+            .zip(interior_samples(b))
+            .map(|(p, q)| {
+                (0..3)
+                    .map(|c| u32::from(p[c]).abs_diff(u32::from(q[c])))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+
+    // The control: this pipeline is deterministic, so re-rendering the flat pass must reproduce it
+    // byte for byte. Without this, driver dither or an uninitialised sample would look like bending.
+    let control = sample_deltas(&flat, &flat_again);
+    assert_eq!(
+        control.iter().copied().max().unwrap_or(0),
+        0,
+        "two renders of the identical flat frame disagree, so the differential below cannot \
+         attribute anything to the curvature"
+    );
+
+    // Anti-vacuous: the backdrop must actually carry structure through the blur where the body samples
+    // it, or a displacement of any size would land on the same colour and this test could not fail.
+    let flat_spread = mean_interior_channel_spread(&flat);
+    assert!(
+        flat_spread > 16.0,
+        "the flat pass has a mean interior channel spread of only {flat_spread:.1}; the checkerboard \
+         has been blurred into a flat field, so displacing the sample point could not change a pixel"
+    );
+
+    let deltas = sample_deltas(&flat, &curved);
+    let bent = deltas.iter().filter(|d| **d >= 2).count();
+    let mean_delta = deltas.iter().sum::<u32>() as f64 / deltas.len() as f64;
+
+    assert!(
+        bent * 4 >= deltas.len(),
+        "only {bent} of {} interior samples moved at all between curvature 0.15 and a flat pane \
+         (mean delta {mean_delta:.2}); the body is still transmitting light straight through, which \
+         is the flat interior this lens replaces",
+        deltas.len()
+    );
+    assert!(
+        mean_delta >= 2.0,
+        "the interior differs from the flat pane by a mean of only {mean_delta:.2} levels; the \
+         curvature is reaching the shader but bending the light by a fraction of a pixel, so nothing \
+         visible happens across the window body"
     );
 }
 
