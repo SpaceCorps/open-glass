@@ -59,6 +59,7 @@ struct CompositeUniforms {
     light_angle: Option<WebGlUniformLocation>,
     roughness: Option<WebGlUniformLocation>,
     saturation: Option<WebGlUniformLocation>,
+    brightness: Option<WebGlUniformLocation>,
     tint_color: Option<WebGlUniformLocation>,
 }
 
@@ -298,6 +299,7 @@ impl WebGl2Renderer {
             light_angle: gl.get_uniform_location(&composite_program, "u_light_angle"),
             roughness: gl.get_uniform_location(&composite_program, "u_roughness"),
             saturation: gl.get_uniform_location(&composite_program, "u_saturation"),
+            brightness: gl.get_uniform_location(&composite_program, "u_brightness"),
             tint_color: gl.get_uniform_location(&composite_program, "u_tint_color"),
         };
 
@@ -530,6 +532,7 @@ impl WebGl2Renderer {
             gl.uniform1f(uniforms.light_angle.as_ref(), quad.optical.light_angle);
             gl.uniform1f(uniforms.roughness.as_ref(), quad.optical.roughness);
             gl.uniform1f(uniforms.saturation.as_ref(), quad.optical.saturation);
+            gl.uniform1f(uniforms.brightness.as_ref(), quad.optical.brightness);
             let tint = quad.optical.tint_color;
             gl.uniform4f(
                 uniforms.tint_color.as_ref(),
@@ -689,6 +692,7 @@ mod tests {
             "u_light_angle",
             "u_roughness",
             "u_saturation",
+            "u_brightness",
             "u_tint_color",
         ] {
             assert!(

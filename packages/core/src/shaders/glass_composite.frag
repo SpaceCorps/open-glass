@@ -15,6 +15,7 @@ uniform float u_sheen_intensity;
 uniform float u_light_angle;
 uniform float u_roughness;
 uniform float u_saturation;
+uniform float u_brightness;
 uniform vec4 u_tint_color;
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
@@ -80,7 +81,12 @@ void main() {
     // The clamp matters: `mix` with a factor above 1.0 extrapolates and can drive a channel out of
     // [0, 1] before the additive sheen ever lands on it.
     vec3 saturated = clamp(mix(vec3(luma), tinted, u_saturation), 0.0, 1.0);
-    vec3 final_rgb = saturated + vec3(fresnel) + vec3(specular + border_light);
+    // The CSS fallback's brightness came from a near-white overlay at alpha 0.22 that the handover
+    // drops to 0.05. Buying that luma back with more white tint would cost chroma (a veil scales
+    // per-pixel channel spread by 1 - a); a gain scales spread by g instead, which is the direction
+    // the chroma gap needs. Before the sheen: the sheen is additive, so scaling it blows highlights.
+    vec3 brightened = clamp(saturated * u_brightness, 0.0, 1.0);
+    vec3 final_rgb = brightened + vec3(fresnel) + vec3(specular + border_light);
 
     fragColor = vec4(final_rgb, alpha);
 }

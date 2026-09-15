@@ -24,6 +24,22 @@ pub struct OpticalParams {
     /// This occupies the slot that used to be reserved padding, so the `#[repr(C)]` layout and the
     /// 16-byte boundary before [`Self::tint_color`] are unchanged.
     pub saturation: f32,
+    /// Multiplicative exposure gain applied to the composite after the saturation clamp and before
+    /// the additive sheen. `1.0` leaves the composite as the blur chain produced it.
+    ///
+    /// This replaces the light the CSS fallback's overlay was contributing and the readiness handover
+    /// takes away (`GlassWindow` steps `rgba(240,240,245,0.22)` down to `0.05`). It has to be a gain
+    /// rather than more white in [`Self::tint_color`], because the two move chroma in opposite
+    /// directions: a veil at alpha `a` scales per-pixel channel spread by `1 - a`, while a gain `g`
+    /// scales it by `g`. The composite is short on *both* luma and chroma against the CSS fallback
+    /// (measured mean luma 110.2 vs 158.0, mean channel spread 19.1 vs 40.1), so only the gain closes
+    /// both at once — keeping the 0.22 veil instead would have reached luma 145 while dropping the
+    /// spread to ~15.6.
+    ///
+    /// Note for the unimplemented WebGPU path: this field takes `OpticalParams` from 48 to 52 bytes
+    /// with no padding slot left. The WebGL2 upload is per-field `uniform1f`, so nothing depends on a
+    /// 16-byte multiple today, but a `std140`/`std430` buffer upload will need explicit padding.
+    pub brightness: f32,
     /// Surface glass tint color (RGBA normalized 0.0 - 1.0).
     pub tint_color: [f32; 4],
 }
@@ -43,6 +59,13 @@ impl Default for OpticalParams {
             // Without it the composite is strictly *less* saturated than the fallback it replaces:
             // `tint_color` mixes 12% white in and the blur chain averages chroma out.
             saturation: 1.8,
+            // Calibrated against the measured playground captures so the CSS-to-GPU handover is
+            // luma-neutral as well as chroma-neutral. With B the raw backdrop luma, W = 240.4 the
+            // luma of `rgba(240,240,245)` and C the composite luma before its own 0.05 overlay:
+            // g = (L_css - 0.05 * W) / (0.95 * C) = (158.0 - 12.0) / (0.95 * 103.4) = 1.486,
+            // rounded onto the playground slider's 0.05 grid. The additive sheen is deliberately not
+            // scaled, so the achieved gain lands slightly under the nominal one.
+            brightness: 1.5,
             tint_color: [1.0, 1.0, 1.0, 0.12],
         }
     }
@@ -379,10 +402,22 @@ mod tests {
     }
 
     #[test]
-    fn test_optical_params_layout_is_unchanged_by_saturation() {
-        // 7 leading f32 + saturation + a 4-float tint = 48 bytes. `saturation` took the reserved
-        // padding slot, so the `#[repr(C)]` layout the GPU uniform upload assumes did not grow.
-        assert_eq!(std::mem::size_of::<OpticalParams>(), 48);
+    fn test_default_brightness_replaces_the_dropped_css_overlay() {
+        // Calibrated so the GPU composite matches the CSS fallback's measured mean luma of 158.0
+        // through the readiness handover: g = (158.0 - 0.05 * 240.4) / (0.95 * 103.4) = 1.486, taken
+        // to the 0.05 slider grid. Above 1.0 is what makes the browser luma differential meaningful.
+        assert!((OpticalParams::default().brightness - 1.5).abs() < 1e-6);
+        assert!(OpticalParams::default().brightness > 1.0);
+    }
+
+    #[test]
+    fn test_optical_params_layout_matches_the_uniform_upload() {
+        // 7 leading f32 + saturation + brightness + a 4-float tint = 52 bytes. The point is that the
+        // layout the GPU uniform upload assumes is pinned, not that the number never changes: adding
+        // `brightness` grew it by one float, and the reserved padding slot `saturation` took is gone.
+        // Safe today only because the WebGL2 composite uploads per field (`uniform1f`) rather than
+        // memcpying the struct into a std140 buffer.
+        assert_eq!(std::mem::size_of::<OpticalParams>(), 52);
         assert_eq!(std::mem::align_of::<OpticalParams>(), 4);
     }
 
