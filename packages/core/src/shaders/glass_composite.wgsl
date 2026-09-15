@@ -31,7 +31,13 @@ struct GlassCompositeUniforms {
     sheen_intensity: f32, // 16
     light_angle: f32,     // 20
     roughness: f32,       // 24
+    // Luma-preserving chroma scale applied after the tint mix. 1.0 leaves the backdrop's saturation
+    // untouched; the CSS fallback's `saturate(180%)` is why the default is not 1.0.
     saturation: f32,      // 28
+    // Multiplicative exposure gain applied after the saturation clamp and before the additive sheen.
+    // Buys back the luma the CSS-to-GPU handover drops when its overlay goes from alpha 0.22 to 0.05 —
+    // a gain rather than more white tint, because a veil at alpha `a` scales per-pixel channel spread
+    // by `1 - a` while a gain scales it by `g`, and the composite is short on chroma as well as luma.
     brightness: f32,      // 32
     thickness: f32,       // 36
     curvature: f32,       // 40
@@ -197,6 +203,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // drops to 0.05. Buying that luma back with more white tint would cost chroma (a veil scales
     // per-pixel channel spread by 1 - a); a gain scales spread by g instead, which is the direction
     // the chroma gap needs. Before the sheen: the sheen is additive, so scaling it blows highlights.
+    //
+    // Both clamps take `vec3<f32>` bounds, not the scalar `0.0, 1.0` the GLSL sibling uses: WGSL's
+    // `clamp` requires all three arguments to be the same type, where GLSL overloads it for a vector
+    // value with scalar bounds. Nothing compiles this file, so the scalar spelling would have gone
+    // unnoticed until the first naga validation.
     let brightened = clamp(saturated * optical.brightness, vec3<f32>(0.0), vec3<f32>(1.0));
     let final_rgb = brightened + vec3<f32>(fresnel) + vec3<f32>(specular + border_light + inner_bevel_light);
 
