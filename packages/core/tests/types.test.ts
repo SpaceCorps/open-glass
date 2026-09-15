@@ -17,6 +17,11 @@ describe("packages/core types and defaults", () => {
     // 0.22 to 0.05: calibrated from the measured captures as (158.0 - 0.05 * 240.4) / (0.95 * 103.4).
     // Must match `OpticalParams::default().brightness` in `packages/core/src/optical/physics.rs`.
     expect(DEFAULT_OPTICAL_PARAMS.brightness).toBe(1.5);
+    // The slab the dual-surface model propagates through, and the body dome's sag. Both must match
+    // `OpticalParams::default()` in `packages/core/src/optical/physics.rs`, which is where the
+    // curvature is calibrated against the ~2.5% macOS body magnification.
+    expect(DEFAULT_OPTICAL_PARAMS.thickness).toBe(10.0);
+    expect(DEFAULT_OPTICAL_PARAMS.curvature).toBe(0.1);
     expect(DEFAULT_OPTICAL_PARAMS.tintColor).toEqual([1.0, 1.0, 1.0, 0.12]);
   });
 

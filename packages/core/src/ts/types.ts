@@ -24,6 +24,19 @@ export interface OpticalParams {
    * fallback the readiness handover replaces. Unlike more tint alpha, a gain lifts chroma with luma.
    */
   brightness?: number;
+  /**
+   * Physical thickness of the glass slab in pixels. The refraction model propagates the entering ray
+   * across this depth before it exits through the rear face, so thickness is what makes the entry
+   * deviation visible at all; 0 collapses the slab to a thin sheet that bends light only at its bevel.
+   */
+  thickness?: number;
+  /**
+   * Curvature of the volumetric lens spanning the glass body: the convex dome's sag as a fraction of
+   * the panel's half-size. The dome tilts the front-surface normal outward from the centre, which
+   * converges the transmitted rays and so magnifies the backdrop. 0 is a flat pane that bends light
+   * only at its perimeter, 0.10 is the subtle macOS-parity default, 0.25 reads as an obvious lens.
+   */
+  curvature?: number;
   /** Surface glass tint color (RGBA normalized 0.0 - 1.0). */
   tintColor?: [number, number, number, number];
 }
