@@ -65,6 +65,11 @@ export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   // The `saturate(180%)` every CSS fallback literal uses, so the handover to the GPU composite does
   // not visibly drain the colour out of the backdrop.
   saturation: 1.8,
+  // Replaces the light the readiness handover takes away when the fallback overlay drops from alpha
+  // 0.22 to 0.05, so the composite matches the CSS fallback's measured mean luma of 158 instead of
+  // reading 1.4x darker. Must stay in step with `OpticalParams::default().brightness` in
+  // `packages/core/src/optical/physics.rs`.
+  brightness: 1.5,
   tintColor: [1.0, 1.0, 1.0, 0.12],
 };
 
@@ -281,9 +286,9 @@ class GlassEngineImpl implements GlassEngine {
           const optical = { ...DEFAULT_OPTICAL_PARAMS, ...quad.optical };
           // Positional, and the order must mirror `OpticalParams`' field order in
           // `packages/core/src/optical/physics.rs`. A swap here is silent — it would feed the
-          // saturation into a tint channel — so `packages/core/tests/webgl2_browser.rs`'s
-          // `the_saturation_term_reaches_the_composite` and `engine.test.ts`' argument-order
-          // assertion both pin it.
+          // saturation or brightness into a tint channel — so `packages/core/tests/webgl2_browser.rs`'s
+          // `the_saturation_term_reaches_the_composite` and `the_brightness_term_holds_the_handover_luma`,
+          // plus `engine.test.ts`' argument-order assertion, all pin it.
           this.wasmEngine.add_quad(
             quad.x,
             quad.y,
@@ -298,6 +303,7 @@ class GlassEngineImpl implements GlassEngine {
             optical.lightAngle,
             optical.roughness,
             optical.saturation,
+            optical.brightness,
             optical.tintColor[0],
             optical.tintColor[1],
             optical.tintColor[2],

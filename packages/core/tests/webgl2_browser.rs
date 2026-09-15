@@ -30,6 +30,11 @@
 //! which renders the same frame at `saturation: 1.0` and at the 1.8 default and requires the measured
 //! chroma to grow.
 //!
+//! Brightness is the third thing pixels can get wrong while every other assertion stays green: a
+//! composite can track the backdrop and keep its chroma and still be markedly darker than the CSS
+//! overlay the readiness handover removes, which is what made the whole page dim ~780ms after load.
+//! [`the_brightness_term_holds_the_handover_luma`] gates that.
+//!
 //! The whole file is `cfg`'d to `wasm32`, so a host `cargo test --workspace` compiles it to nothing
 //! and reports zero tests for this target rather than failing to build.
 
@@ -104,6 +109,12 @@ const MUTED_QUADRANTS: [&str; 4] = [
     "rgb(64, 64, 64)",
 ];
 
+/// [`MUTED_QUADRANTS`] as numbers, so [`the_brightness_term_holds_the_handover_luma`]'s CSS-fallback
+/// luma model is computed from the backdrop the test actually renders instead of a copied constant.
+/// That test asserts the two agree, so editing one and not the other fails rather than drifts.
+const MUTED_QUADRANT_RGB: [[u8; 3]; 4] =
+    [[176, 96, 160], [96, 176, 128], [96, 128, 176], [64, 64, 64]];
+
 /// A backdrop with four distinct solid quadrants, in DOM orientation: row 0 is the *top*.
 fn backdrop_canvas() -> HtmlCanvasElement {
     quadrant_canvas(PRIMARY_QUADRANTS)
@@ -163,6 +174,42 @@ fn channel_spread(pixel: [u8; 4]) -> u32 {
     let max = pixel[0].max(pixel[1]).max(pixel[2]);
     let min = pixel[0].min(pixel[1]).min(pixel[2]);
     u32::from(max) - u32::from(min)
+}
+
+/// Rec. 709 luma of one sample, in the same 0-255 space as the screenshot analysis scripts.
+fn luma(pixel: [u8; 4]) -> f64 {
+    0.2126 * f64::from(pixel[0]) + 0.7152 * f64::from(pixel[1]) + 0.0722 * f64::from(pixel[2])
+}
+
+/// Walk the panel interior on the same inset grid as the non-uniformity check in
+/// [`the_panel_refracts_the_backdrop_beneath_it`], so the SDF edge falloff and the sheen ring stay
+/// out of any mean taken over it.
+fn interior_samples(pixels: &[u8]) -> Vec<[u8; 4]> {
+    let mut samples = Vec::new();
+    for y in (48..HEIGHT - 48).step_by(16) {
+        for x in (48..WIDTH - 48).step_by(16) {
+            samples.push(dom_pixel(pixels, x, y));
+        }
+    }
+    samples
+}
+
+/// Mean [`luma`] over [`interior_samples`].
+fn mean_interior_luma(pixels: &[u8]) -> f64 {
+    let samples = interior_samples(pixels);
+    samples.iter().copied().map(luma).sum::<f64>() / samples.len() as f64
+}
+
+/// Mean [`channel_spread`] over [`interior_samples`] — the "mean channel spread" the playground
+/// captures are measured on, so a brightness gain that reached white cannot hide here.
+fn mean_interior_channel_spread(pixels: &[u8]) -> f64 {
+    let samples = interior_samples(pixels);
+    samples
+        .iter()
+        .copied()
+        .map(|p| f64::from(channel_spread(p)))
+        .sum::<f64>()
+        / samples.len() as f64
 }
 
 /// Render the backdrop with one inset quad at these optical parameters and read the frame back.
@@ -396,13 +443,25 @@ fn the_panel_refracts_the_backdrop_beneath_it() {
 /// saturation for a tint channel, or if a future edit drops the `mix` from the shader — none of which
 /// the absolute floor in [`the_panel_refracts_the_backdrop_beneath_it`] would distinguish from a driver
 /// difference.
+///
+/// Both passes pin `brightness: 1.0`, which is the *only* thing about this test that changed when the
+/// gain landed. It is not a relaxation — the 1.3x threshold and all three guards below are untouched —
+/// it isolates the term under test. At the calibrated default gain these mid-tones clip: the magenta
+/// quadrant reads `[255, 155, 255]` against `[255, 177, 255]`, so two of three channels are pinned to
+/// white in both passes and the measured ratio falls to 1.28 no matter how well `u_saturation` works.
+/// That is the same clipping hazard that made [`MUTED_QUADRANTS`] necessary in the first place, one
+/// step further along the shader.
 #[wasm_bindgen_test]
 fn the_saturation_term_reaches_the_composite() {
     let neutral = render_backdrop_with(OpticalParams {
         saturation: 1.0,
+        brightness: 1.0,
         ..OpticalParams::default()
     });
-    let boosted = render_backdrop_with(OpticalParams::default());
+    let boosted = render_backdrop_with(OpticalParams {
+        brightness: 1.0,
+        ..OpticalParams::default()
+    });
 
     let (qx, qy) = (WIDTH / 4, HEIGHT / 4);
     let neutral_red = dom_pixel(&neutral, qx, qy);
@@ -427,6 +486,100 @@ fn the_saturation_term_reaches_the_composite() {
         "this test assumes the default boosts chroma; a default of \
          {} makes it vacuous",
         OpticalParams::default().saturation
+    );
+}
+
+/// The `brightness` gain must carry the luma the readiness handover takes away.
+///
+/// Every panel drops its CSS overlay from a near-white alpha 0.22 to 0.05 the instant the renderer
+/// reports ready, so the composite underneath has to be at least as bright as the veil it replaces or
+/// the whole page visibly darkens at ~780ms. `brightness` is that lever, and this is the gate that
+/// stops it silently going away.
+///
+/// **One-sided, not a band.** The synthetic scene here does not reproduce the playground's deficit:
+/// the panel covers the whole backdrop, so no darker surround is averaged into the blur, and at
+/// `brightness: 1.0` the composite already sits near the CSS-overlay model. An absolute two-sided
+/// parity assertion would therefore fail correct code — the same hazard that made
+/// [`the_saturation_term_reaches_the_composite`] use muted mid-tones instead of primaries. So: a floor
+/// plus a differential.
+///
+/// The floor models what the CSS fallback paints over this exact backdrop —
+/// `0.78 * backdrop_luma + 0.22 * 240.4`, `GlassWindow`'s `rgba(240, 240, 245, 0.22)` over the
+/// backdrop — and relies on two properties of the chains being compared: the blur is mean-preserving
+/// (a normalized kernel over a backdrop whose quadrants all sit under the panel), and CSS `saturate()`
+/// and `u_saturation` are both luma-preserving, so neither side's chroma scale shifts the mean.
+#[wasm_bindgen_test]
+fn the_brightness_term_holds_the_handover_luma() {
+    for (rgb, css) in MUTED_QUADRANT_RGB.iter().zip(MUTED_QUADRANTS) {
+        assert_eq!(
+            format!("rgb({}, {}, {})", rgb[0], rgb[1], rgb[2]),
+            css,
+            "MUTED_QUADRANT_RGB and MUTED_QUADRANTS disagree, so the luma model below is not \
+             describing the backdrop this test renders"
+        );
+    }
+
+    // Luma of `rgba(240, 240, 245)`, the overlay colour GlassWindow fades.
+    const OVERLAY_LUMA: f64 = 0.2126 * 240.0 + 0.7152 * 240.0 + 0.0722 * 245.0;
+    let backdrop_luma = MUTED_QUADRANT_RGB
+        .iter()
+        .map(|rgb| luma([rgb[0], rgb[1], rgb[2], 255]))
+        .sum::<f64>()
+        / MUTED_QUADRANT_RGB.len() as f64;
+    let css_fallback_luma = 0.78 * backdrop_luma + 0.22 * OVERLAY_LUMA;
+
+    let neutral = render_backdrop_with(OpticalParams {
+        brightness: 1.0,
+        ..OpticalParams::default()
+    });
+    let boosted = render_backdrop_with(OpticalParams::default());
+
+    let neutral_luma = mean_interior_luma(&neutral);
+    let boosted_luma = mean_interior_luma(&boosted);
+
+    // Anti-vacuous, in the spirit of the three on `the_saturation_term_reaches_the_composite`:
+    // (a) the default must actually be a boost, or the differential compares a value to itself;
+    assert!(
+        OpticalParams::default().brightness > 1.0,
+        "this test assumes the default gain lifts luma; a default of {} makes it vacuous",
+        OpticalParams::default().brightness
+    );
+    // (b) the neutral pass must have headroom, or a 1.25x rise is not representable in 8 bits;
+    assert!(
+        neutral_luma < 200.0,
+        "the brightness: 1.0 pass already reads {neutral_luma:.1} mean interior luma, too close to \
+         white for a 1.25x rise to be representable — this test could only pass by clipping"
+    );
+    // (c) the boosted pass must not simply have been cranked to white, which is how "raise g until it
+    //     passes" would satisfy the floor while looking worse than the CSS it replaces.
+    assert!(
+        boosted_luma < 245.0,
+        "the default-brightness pass reads {boosted_luma:.1} mean interior luma — the composite has \
+         been driven to near-white, not calibrated"
+    );
+    let boosted_spread = mean_interior_channel_spread(&boosted);
+    assert!(
+        boosted_spread > 16.0,
+        "the default-brightness pass has a mean interior channel spread of {boosted_spread:.1}; the \
+         gain has clipped the backdrop's colour away instead of lifting it (the brightness lever \
+         exists precisely because a white veil would do this)"
+    );
+
+    assert!(
+        boosted_luma >= css_fallback_luma,
+        "the composite reads {boosted_luma:.1} mean interior luma against the {css_fallback_luma:.1} \
+         the CSS fallback paints over the same backdrop (0.78 * {backdrop_luma:.1} + 0.22 * \
+         {OVERLAY_LUMA:.1}); the readiness handover would darken the page by \
+         {:.0}%",
+        (1.0 - boosted_luma / css_fallback_luma) * 100.0
+    );
+    assert!(
+        boosted_luma >= neutral_luma * 1.25,
+        "brightness {} gave {boosted_luma:.1} mean interior luma against {neutral_luma:.1} at 1.0 — \
+         a ratio of {:.2}, so u_brightness is either not resolved, not uploaded per quad, swapped \
+         into a tint channel by the positional add_quad order, or dropped from the shader",
+        OpticalParams::default().brightness,
+        boosted_luma / neutral_luma
     );
 }
 

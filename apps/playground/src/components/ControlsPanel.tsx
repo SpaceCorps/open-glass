@@ -264,6 +264,26 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           </div>
         </div>
 
+        {/* Glass Brightness — also the calibration tool for the CSS-to-GPU luma handover. */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+            <span>Glass Brightness</span>
+            <span style={{ fontFamily: "monospace" }}>{optical.brightness.toFixed(2)}</span>
+          </div>
+          <input
+            type="range"
+            min="1.0"
+            max="2.0"
+            step="0.05"
+            value={optical.brightness}
+            onChange={(e) => update("brightness", Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ fontSize: "0.6875rem", color: "#888", marginTop: "2px" }}>
+            1.00 Composite as blurred · 1.50 CSS fallback luma
+          </div>
+        </div>
+
         {/* Tint Opacity */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>

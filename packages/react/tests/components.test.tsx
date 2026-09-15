@@ -546,4 +546,102 @@ describe("Open Glass React Components", () => {
     expect(btn.style.transform).toContain("translateY(4px)");
     expect(btn.style.transform).toContain("scale(0.97)");
   });
+
+  it("cross-fades the overlay on every component in both readiness states", () => {
+    // The defect this guards: each component used to cut its overlay alpha in a single step when
+    // `isRenderReady` flipped ~780ms after mount, so the whole page visibly darkened at once. The
+    // alphas are unchanged — the luma comes back from the composite's `brightness` term — but the veil
+    // change has to ramp. `background-color` is the animatable longhand; naming the `background`
+    // shorthand in a transition animates nothing.
+    for (const isRenderReady of [false, true]) {
+      const { unmount } = render(
+        <GlassContext.Provider value={mockContext({ hasBackgroundSource: true, isRenderReady })}>
+          <GlassCard data-testid="fade-card">Card</GlassCard>
+          <GlassWindow title="Window" data-testid="fade-window">
+            Content
+          </GlassWindow>
+          <GlassDock items={dockItems} data-testid="fade-dock" />
+          <GlassNavbar data-testid="fade-navbar">Navbar</GlassNavbar>
+          <GlassButton data-testid="fade-button">Button</GlassButton>
+        </GlassContext.Provider>,
+      );
+
+      for (const id of ["fade-card", "fade-window", "fade-dock", "fade-navbar", "fade-button"]) {
+        const el = screen.getByTestId(id);
+        expect(el.style.transition).toMatch(/background-color \d+ms/);
+      }
+
+      unmount();
+    }
+  });
+
+  it("appends the overlay cross-fade to a caller transition instead of replacing it", () => {
+    // GlassWindow is the hard case: it already resolves `style?.transition ?? <parallax transform
+    // transition>`, and the `...style` spread runs after the handover, so the entry has to be
+    // reinstated explicitly — the same hazard the `transform: combinedTransform` comment documents.
+    render(
+      <GlassContext.Provider
+        value={mockContext({ hasBackgroundSource: true, isRenderReady: true })}
+      >
+        <GlassWindow
+          title="Custom Transition"
+          data-testid="transition-window"
+          style={{ transition: "opacity 1s ease" }}
+        >
+          Content
+        </GlassWindow>
+      </GlassContext.Provider>,
+    );
+
+    const windowEl = screen.getByTestId("transition-window");
+    expect(windowEl.style.transition).toContain("opacity 1s ease");
+    expect(windowEl.style.transition).toMatch(/background-color \d+ms/);
+  });
+
+  it("leaves the ready and fallback overlay alphas exactly where they were", () => {
+    // The cross-fade replaces the step, not the alphas. If this plan had quietly raised a fallback
+    // alpha to hide the luma gap instead of fixing the composite, this is what would catch it.
+    for (const [isRenderReady, expected] of [
+      [
+        false,
+        {
+          "alpha-card": "rgba(255, 255, 255, 0.15)",
+          "alpha-window": "rgba(240, 240, 245, 0.22)",
+          "alpha-dock": "rgba(255, 255, 255, 0.16)",
+          "alpha-navbar": "rgba(255, 255, 255, 0.14)",
+          "alpha-button": "rgba(255, 255, 255, 0.22)",
+        },
+      ],
+      [
+        true,
+        {
+          "alpha-card": "rgba(255, 255, 255, 0.03)",
+          "alpha-window": "rgba(240, 240, 245, 0.05)",
+          "alpha-dock": "rgba(255, 255, 255, 0.04)",
+          "alpha-navbar": "rgba(255, 255, 255, 0.03)",
+          "alpha-button": "rgba(255, 255, 255, 0.08)",
+        },
+      ],
+    ] as const) {
+      const { unmount } = render(
+        <GlassContext.Provider value={mockContext({ hasBackgroundSource: true, isRenderReady })}>
+          <GlassCard data-testid="alpha-card">Card</GlassCard>
+          <GlassWindow title="Window" data-testid="alpha-window">
+            Content
+          </GlassWindow>
+          <GlassDock items={dockItems} data-testid="alpha-dock" />
+          <GlassNavbar data-testid="alpha-navbar">Navbar</GlassNavbar>
+          <GlassButton variant="primary" data-testid="alpha-button">
+            Button
+          </GlassButton>
+        </GlassContext.Provider>,
+      );
+
+      for (const [id, background] of Object.entries(expected)) {
+        expect(screen.getByTestId(id).style.background).toBe(background);
+      }
+
+      unmount();
+    }
+  });
 });

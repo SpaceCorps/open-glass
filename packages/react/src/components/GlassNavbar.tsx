@@ -2,6 +2,7 @@ import React, { forwardRef, useContext, type HTMLAttributes, type ReactNode } fr
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { glassHandoverStyle } from "../surface";
 
 export interface GlassNavbarProps extends HTMLAttributes<HTMLElement> {
   children?: ReactNode;
@@ -20,7 +21,13 @@ export const GlassNavbar = forwardRef<HTMLElement, GlassNavbarProps>(
     // composites, keeping the CSS blur on would stack two different glass models in one scene.
     const context = useContext(GlassContext);
     const isRenderReady = context?.isRenderReady ?? false;
-    const cssBackdrop = "blur(24px) saturate(180%)";
+    const handover = glassHandoverStyle({
+      isRenderReady,
+      fallbackBackground: "rgba(255, 255, 255, 0.14)",
+      readyBackground: "rgba(255, 255, 255, 0.03)",
+      cssBackdrop: "blur(24px) saturate(180%)",
+      transition: style?.transition,
+    });
 
     return (
       <header
@@ -44,11 +51,12 @@ export const GlassNavbar = forwardRef<HTMLElement, GlassNavbarProps>(
           justifyContent: "space-between",
           padding: "0.875rem 2rem",
           borderBottom: "1px solid rgba(255, 255, 255, 0.25)",
-          background: isRenderReady ? "rgba(255, 255, 255, 0.03)" : "rgba(255, 255, 255, 0.14)",
-          backdropFilter: isRenderReady ? "none" : cssBackdrop,
-          WebkitBackdropFilter: isRenderReady ? "none" : cssBackdrop,
+          ...handover,
           boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
           ...style,
+          // After `...style`: the caller's own transition is already folded into the handover, and
+          // spreading it last would drop the overlay cross-fade appended to it.
+          transition: handover.transition,
         }}
         {...rest}
       >

@@ -18,6 +18,12 @@ export interface OpticalParams {
    * matches the CSS `saturate(180%)` fallback.
    */
   saturation?: number;
+  /**
+   * Multiplicative exposure gain applied after the saturation clamp and before the additive sheen;
+   * 1.0 leaves the composite as the blur chain produced it, 1.5 matches the mean luma of the CSS
+   * fallback the readiness handover replaces. Unlike more tint alpha, a gain lifts chroma with luma.
+   */
+  brightness?: number;
   /** Surface glass tint color (RGBA normalized 0.0 - 1.0). */
   tintColor?: [number, number, number, number];
 }

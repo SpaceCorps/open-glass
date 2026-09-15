@@ -13,6 +13,10 @@ describe("packages/core types and defaults", () => {
     // Matches the `saturate(180%)` in every CSS `backdrop-filter` fallback literal, so dropping the
     // fallback for the GPU composite does not visibly desaturate the panel.
     expect(DEFAULT_OPTICAL_PARAMS.saturation).toBe(1.8);
+    // Replaces the light the readiness handover removes when the fallback overlay drops from alpha
+    // 0.22 to 0.05: calibrated from the measured captures as (158.0 - 0.05 * 240.4) / (0.95 * 103.4).
+    // Must match `OpticalParams::default().brightness` in `packages/core/src/optical/physics.rs`.
+    expect(DEFAULT_OPTICAL_PARAMS.brightness).toBe(1.5);
     expect(DEFAULT_OPTICAL_PARAMS.tintColor).toEqual([1.0, 1.0, 1.0, 0.12]);
   });
 
