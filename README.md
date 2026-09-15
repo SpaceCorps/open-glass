@@ -55,6 +55,39 @@ TypeScript facade (`createGlassEngine`, `initWasmEngine`, `calculateFresnel`). `
 declarative components on top, publishing each element's geometry as a glass quad. `apps/playground`
 exercises the whole surface. It is **not** Storybook — it is a hand-written Vite+ single-page app.
 
+## Form Controls
+
+`packages/react` ships five glass form controls alongside the panel surfaces, so a login form, a
+settings pane or a preferences dialog can be built out of the library rather than around it:
+
+| Component       | Underlying element        | Notes                                                                                                                                    |
+| --------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `GlassInput`    | `<input>`                 | Optional `label`, `error` (rendered `role="alert"`) and `invalid`; `aria-describedby` merges with the caller's rather than replacing it. |
+| `GlassToggle`   | `<button role="switch">`  | `checked` / `onCheckedChange`; both Space and Enter toggle.                                                                              |
+| `GlassSlider`   | `<input type="range">`    | Arrows step by `step`, `Home`/`End` clamp, `PageUp`/`PageDown` move by `10 × step`.                                                      |
+| `GlassCheckbox` | `<input type="checkbox">` | `indeterminate` is set as a DOM property and reported as `aria-checked="mixed"`.                                                         |
+| `GlassSelect`   | `<select>`                | Styled native element; its dropdown list is UA-rendered and is not glass.                                                                |
+
+Each one registers a glass quad through `useGlassElement` and switches its CSS `backdrop-filter`
+literal to `none` on `isRenderReady`, exactly like the panel components.
+
+**Native elements, deliberately.** Select, slider and checkbox wrap real form elements instead of
+hand-rolled widgets. A custom listbox needs full ARIA combobox semantics, focus trapping and
+type-ahead, and a half-implemented one is worse for assistive-technology users than a styled native
+element — which also brings the platform popup on mobile for free. The slider and checkbox do add
+explicit key handlers with `preventDefault()`, so a keypress produces exactly one step or toggle
+rather than two, and so the keyboard contract is assertable rather than assumed.
+
+**The focus ring is a box-shadow, never an `outline`.** `useFocusRing` resolves focus-visible in
+JavaScript — inline styles cannot express a pseudo-class and this package has no stylesheet — by
+tracking pointer modality: a `pointerdown` immediately before focus means the focus came from a
+mouse and no ring is drawn. `focusRing()` in `packages/react/src/components/glassFieldStyles.ts`
+then returns a `border` plus two stacked box-shadows, a dark contrast ring under a bright halo, so
+the indicator holds up against both the light CSS-blur fallback and the GPU composite. An `outline`
+would not: once the renderer is ready the control sets `backdrop-filter: none`, leaving the outline
+drawn over GPU-composited pixels with no guaranteed contrast. The unfocused state keeps the same
+border width, so gaining focus never reflows layout.
+
 ## Getting Started
 
 ### Prerequisites
