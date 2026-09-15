@@ -627,26 +627,42 @@ impl WebGl2Renderer {
         gl.draw_arrays(Gl::TRIANGLES, 0, 3);
     }
 
-    /// Ready the default framebuffer for compositing: clear it once, whatever the quads do next.
+    /// Detach every band's textures from their sampler units before the blur chain writes into them.
+    ///
+    /// Mip level 0 is both the composite's source and the last upsample pass' render target. A draw
+    /// whose colour attachment is also bound to one of its samplers is a feedback loop, which WebGL2
+    /// answers with INVALID_OPERATION and no write at all — so after the first group of a frame had
+    /// composited, every later group's blur was silently dropped and kept sampling the first group's
+    /// radius. That is the shared-blur bug wearing a different hat, and it only shows up with two
+    /// distinct radii in one frame.
+    fn unbind_band_textures(&self) {
+        let gl = &self.gl;
+        for index in 0..MAX_BACKDROP_BANDS {
+            gl.active_texture(Gl::TEXTURE0 + index as u32);
+            gl.bind_texture(Gl::TEXTURE_2D, None);
+        }
+        gl.active_texture(Gl::TEXTURE0);
+    }
+
+    /// Clear the default framebuffer once, before any group draws over it.
     fn begin_composite(&self) {
         let gl = &self.gl;
         gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
         gl.viewport(0, 0, self.width as i32, self.height as i32);
         gl.clear_color(0.0, 0.0, 0.0, 0.0);
         gl.clear(Gl::COLOR_BUFFER_BIT);
-
-        gl.enable(Gl::BLEND);
-        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
-        self.bind_bands_for_composite();
     }
 
-    /// Bind the composite program and every band's blurred level 0 to its own texture unit.
+    /// Aim the composite at the canvas, and bind every band's blurred level 0 to its own texture unit.
     ///
-    /// Called again before each group's draws, not once per frame: a blur run in between binds its own
-    /// source to unit 0 and leaves the blur program current, so unit 0 would otherwise hold whatever
-    /// the last blur pass sampled.
+    /// Called before each group's draws rather than once per frame, because the blur run in between
+    /// leaves the GL state pointed somewhere else entirely: its last pass has a mip level's framebuffer
+    /// bound and that level's viewport set, the blur program current, and its own source on unit 0. Skip
+    /// any part of this and the group composites into band 0's mip texture instead of the canvas.
     fn bind_bands_for_composite(&self) {
         let gl = &self.gl;
+        gl.bind_framebuffer(Gl::FRAMEBUFFER, None);
+        gl.viewport(0, 0, self.width as i32, self.height as i32);
         gl.use_program(Some(&self.composite_program));
 
         let uniforms = &self.composite_uniforms;
@@ -669,9 +685,14 @@ impl WebGl2Renderer {
     }
 
     /// Composite the given quads over the canvas, sampling each band's blurred level 0.
+    ///
+    /// Blending is enabled here and disabled again on the way out, so the blur chain that runs between
+    /// groups keeps writing its passes straight into the mip levels rather than blending them.
     fn draw_quad_group(&self, indices: &[usize]) {
         let gl = &self.gl;
         self.bind_bands_for_composite();
+        gl.enable(Gl::BLEND);
+        gl.blend_func(Gl::SRC_ALPHA, Gl::ONE_MINUS_SRC_ALPHA);
 
         let uniforms = &self.composite_uniforms;
         for quad in indices.iter().filter_map(|&index| self.quads.get(index)) {
@@ -757,6 +778,7 @@ impl GlassRenderer for WebGl2Renderer {
         // *different* radii now composite in group order (ascending radius) rather than submission
         // order; layers.ts:13-14 already documents overlapping glass as unsupported.
         for (radius, indices) in blur_groups(&self.quads) {
+            self.unbind_band_textures();
             for band in 0..self.active_bands() {
                 self.run_blur_passes(band, radius);
             }

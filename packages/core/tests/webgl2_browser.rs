@@ -41,12 +41,24 @@
 //! did before the volumetric lens.
 //! [`the_volumetric_curvature_bends_interior_light`] gates that.
 //!
+//! Depth is the fifth. Every assertion above holds for a pipeline where *everything* behind the glass
+//! sits at one calibrated distance, because a single band is all they upload — so wallpaper and a card
+//! floating just under the panel refracted identically and moving a panel produced no differential
+//! parallax. [`a_deeper_band_parallaxes_further_than_a_near_one`] gates the distance reaching the
+//! refraction, [`a_near_band_occludes_the_far_band_it_covers`] that the bands composite near-over-far
+//! rather than averaging, and [`releasing_a_band_stops_it_being_sampled`] that an unmounted layer's
+//! stale raster stops being refracted.
+//!
+//! Per-quad blur is the sixth: the composite used to sample one backdrop blurred at the *mean* radius of
+//! every submitted quad, so two panels with different `blurRadius` values rendered identically.
+//! [`two_panels_blur_at_their_own_radius`] gates that.
+//!
 //! The whole file is `cfg`'d to `wasm32`, so a host `cargo test --workspace` compiles it to nothing
 //! and reports zero tests for this target rather than failing to build.
 
 #![cfg(target_arch = "wasm32")]
 
-use open_glass_core::optical::physics::OpticalParams;
+use open_glass_core::optical::physics::{self, OpticalParams};
 use open_glass_core::renderer::{webgl2::WebGl2Renderer, GlassQuad, GlassRenderer};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -126,15 +138,20 @@ fn backdrop_canvas() -> HtmlCanvasElement {
     quadrant_canvas(PRIMARY_QUADRANTS)
 }
 
-/// [`backdrop_canvas`] with the quadrant colours given, clockwise from the DOM top-left.
-fn quadrant_canvas(colors: [&str; 4]) -> HtmlCanvasElement {
-    let canvas = create_canvas(WIDTH, HEIGHT);
-    let ctx = canvas
+/// The canvas' 2D context, for painting a backdrop raster.
+fn canvas_2d(canvas: &HtmlCanvasElement) -> CanvasRenderingContext2d {
+    canvas
         .get_context("2d")
         .expect("requesting a 2d context threw")
         .expect("2d is not available on this canvas")
         .dyn_into::<CanvasRenderingContext2d>()
-        .expect("the canvas returned a non-2D context");
+        .expect("the canvas returned a non-2D context")
+}
+
+/// [`backdrop_canvas`] with the quadrant colours given, clockwise from the DOM top-left.
+fn quadrant_canvas(colors: [&str; 4]) -> HtmlCanvasElement {
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let ctx = canvas_2d(&canvas);
 
     let half_w = f64::from(WIDTH) / 2.0;
     let half_h = f64::from(HEIGHT) / 2.0;
@@ -162,12 +179,7 @@ fn quadrant_canvas(colors: [&str; 4]) -> HtmlCanvasElement {
 fn muted_checkerboard() -> HtmlCanvasElement {
     const CELL: f64 = 64.0;
     let canvas = create_canvas(WIDTH, HEIGHT);
-    let ctx = canvas
-        .get_context("2d")
-        .expect("requesting a 2d context threw")
-        .expect("2d is not available on this canvas")
-        .dyn_into::<CanvasRenderingContext2d>()
-        .expect("the canvas returned a non-2D context");
+    let ctx = canvas_2d(&canvas);
 
     let cols = (f64::from(WIDTH) / CELL).ceil() as u32;
     let rows = (f64::from(HEIGHT) / CELL).ceil() as u32;
@@ -181,6 +193,28 @@ fn muted_checkerboard() -> HtmlCanvasElement {
         }
     }
 
+    canvas
+}
+
+/// A fully opaque single-colour band raster.
+fn solid_canvas(color: &str) -> HtmlCanvasElement {
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let ctx = canvas_2d(&canvas);
+    ctx.set_fill_style_str(color);
+    ctx.fill_rect(0.0, 0.0, f64::from(WIDTH), f64::from(HEIGHT));
+    canvas
+}
+
+/// A band raster that is opaque over the canvas' left half and *transparent* over its right.
+///
+/// This is the shape a near content layer actually has: it covers part of the panel and leaves the rest
+/// of the panel looking through to whatever is further away. The transparent half is what the band's
+/// own alpha has to carry through the blur chain into `accumulateBand`.
+fn left_half_canvas(color: &str) -> HtmlCanvasElement {
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let ctx = canvas_2d(&canvas);
+    ctx.set_fill_style_str(color);
+    ctx.fill_rect(0.0, 0.0, f64::from(WIDTH) / 2.0, f64::from(HEIGHT));
     canvas
 }
 
@@ -233,22 +267,93 @@ fn interior_samples(pixels: &[u8]) -> Vec<[u8; 4]> {
     samples
 }
 
+/// [`interior_samples`] for one quad of a multi-panel frame, so each panel can be measured on its own.
+///
+/// Same 48px inset and 16px step as [`interior_samples`], but relative to the quad's own rect rather
+/// than the canvas'.
+fn interior_samples_of(pixels: &[u8], quad: &GlassQuad) -> Vec<[u8; 4]> {
+    const INSET: u32 = 48;
+    let left = quad.x as u32 + INSET;
+    let top = quad.y as u32 + INSET;
+    let right = (quad.x + quad.width) as u32 - INSET;
+    let bottom = (quad.y + quad.height) as u32 - INSET;
+
+    let mut samples = Vec::new();
+    for y in (top..bottom).step_by(16) {
+        for x in (left..right).step_by(16) {
+            samples.push(dom_pixel(pixels, x, y));
+        }
+    }
+    samples
+}
+
 /// Mean [`luma`] over [`interior_samples`].
 fn mean_interior_luma(pixels: &[u8]) -> f64 {
     let samples = interior_samples(pixels);
     samples.iter().copied().map(luma).sum::<f64>() / samples.len() as f64
 }
 
-/// Mean [`channel_spread`] over [`interior_samples`] — the "mean channel spread" the playground
-/// captures are measured on, so a brightness gain that reached white cannot hide here.
-fn mean_interior_channel_spread(pixels: &[u8]) -> f64 {
-    let samples = interior_samples(pixels);
+/// Mean [`channel_spread`] over the given samples — the "mean channel spread" the playground captures
+/// are measured on, so a brightness gain that reached white cannot hide here.
+fn mean_channel_spread(samples: &[[u8; 4]]) -> f64 {
     samples
         .iter()
         .copied()
         .map(|p| f64::from(channel_spread(p)))
         .sum::<f64>()
         / samples.len() as f64
+}
+
+/// [`mean_channel_spread`] over [`interior_samples`].
+fn mean_interior_channel_spread(pixels: &[u8]) -> f64 {
+    mean_channel_spread(&interior_samples(pixels))
+}
+
+/// Mean absolute luma step between horizontally adjacent samples across the interior of `quad`.
+///
+/// This is the measure of *blur strength*, and channel spread is not: destroying local contrast is the
+/// whole job of a blur, whereas averaging two muted colours together leaves each pixel about as
+/// chromatic as it started. Measured on one panel over [`muted_checkerboard`], going from a 2px radius to
+/// a 30px one moves the mean interior channel spread from 62.2 to 54.3 — a 1.15x ratio for a 15x radius,
+/// which no honest threshold fits between — while it moves the mean luma step from 5.19 to 1.00. The step
+/// collapses because it *is* the detail the kernel removes.
+///
+/// The 8px stride is deliberately finer than [`interior_samples_of`]'s 16px: adjacent samples have to be
+/// close enough together that a narrow blur leaves the step between them intact.
+fn mean_interior_luma_step(pixels: &[u8], quad: &GlassQuad) -> f64 {
+    const INSET: u32 = 48;
+    const STRIDE: u32 = 8;
+    let left = quad.x as u32 + INSET;
+    let top = quad.y as u32 + INSET;
+    let right = (quad.x + quad.width) as u32 - INSET;
+    let bottom = (quad.y + quad.height) as u32 - INSET;
+
+    let mut steps = Vec::new();
+    for y in (top..bottom).step_by(STRIDE as usize) {
+        for x in (left..right.saturating_sub(STRIDE)).step_by(STRIDE as usize) {
+            let here = luma(dom_pixel(pixels, x, y));
+            let next = luma(dom_pixel(pixels, x + STRIDE, y));
+            steps.push((here - next).abs());
+        }
+    }
+    steps.iter().sum::<f64>() / steps.len().max(1) as f64
+}
+
+/// Largest single-channel difference between two frames at each [`interior_samples`] point.
+///
+/// The differential every optical test in this file is built on: two frames that differ in exactly one
+/// parameter, compared where only the panel body can have moved the result.
+fn interior_sample_deltas(a: &[u8], b: &[u8]) -> Vec<u32> {
+    interior_samples(a)
+        .into_iter()
+        .zip(interior_samples(b))
+        .map(|(p, q)| {
+            (0..3)
+                .map(|c| u32::from(p[c]).abs_diff(u32::from(q[c])))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 /// Render the backdrop with one inset quad at these optical parameters and read the frame back.
@@ -263,12 +368,35 @@ fn render_backdrop_with(optical: OpticalParams) -> Vec<u8> {
 
 /// [`render_backdrop_with`] over an arbitrary backdrop.
 fn render_over(backdrop: &HtmlCanvasElement, optical: OpticalParams) -> Vec<u8> {
+    render_quads_over(backdrop, &[inset_quad_with(optical)])
+}
+
+/// [`render_over`] with the quads given, for frames that carry more than one panel.
+fn render_quads_over(backdrop: &HtmlCanvasElement, quads: &[GlassQuad]) -> Vec<u8> {
     let canvas = create_canvas(WIDTH, HEIGHT);
     let mut renderer =
         WebGl2Renderer::new(&canvas, WIDTH, HEIGHT).expect("WebGl2Renderer::new failed");
     renderer
         .set_background_from_canvas(backdrop)
         .expect("uploading the backdrop failed");
+    renderer.update_quads(quads).expect("update_quads failed");
+    renderer.render().expect("render failed");
+    read_canvas(&request_context(&canvas))
+}
+
+/// Render one inset quad over a stack of depth bands, band 0 first (farthest), and read the frame back.
+///
+/// Each entry is a raster and the distance in pixels behind the glass rear face that raster sits at, or
+/// `physics::AUTO_BACKDROP_DEPTH` for the calibrated fallback.
+fn render_bands(bands: &[(&HtmlCanvasElement, f32)], optical: OpticalParams) -> Vec<u8> {
+    let canvas = create_canvas(WIDTH, HEIGHT);
+    let mut renderer =
+        WebGl2Renderer::new(&canvas, WIDTH, HEIGHT).expect("WebGl2Renderer::new failed");
+    for (band, (raster, depth)) in bands.iter().enumerate() {
+        renderer
+            .set_band_from_canvas(band as u32, raster, *depth)
+            .unwrap_or_else(|error| panic!("uploading band {band} failed: {error}"));
+    }
     renderer
         .update_quads(&[inset_quad_with(optical)])
         .expect("update_quads failed");
@@ -664,23 +792,9 @@ fn the_volumetric_curvature_bends_interior_light() {
     let flat_again = render_over(&backdrop, flat_optical);
     let curved = render_over(&backdrop, curved_optical);
 
-    // Largest single-channel difference between two frames at each interior sample.
-    let sample_deltas = |a: &[u8], b: &[u8]| -> Vec<u32> {
-        interior_samples(a)
-            .into_iter()
-            .zip(interior_samples(b))
-            .map(|(p, q)| {
-                (0..3)
-                    .map(|c| u32::from(p[c]).abs_diff(u32::from(q[c])))
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect()
-    };
-
     // The control: this pipeline is deterministic, so re-rendering the flat pass must reproduce it
     // byte for byte. Without this, driver dither or an uninitialised sample would look like bending.
-    let control = sample_deltas(&flat, &flat_again);
+    let control = interior_sample_deltas(&flat, &flat_again);
     assert_eq!(
         control.iter().copied().max().unwrap_or(0),
         0,
@@ -697,7 +811,7 @@ fn the_volumetric_curvature_bends_interior_light() {
          has been blurred into a flat field, so displacing the sample point could not change a pixel"
     );
 
-    let deltas = sample_deltas(&flat, &curved);
+    let deltas = interior_sample_deltas(&flat, &curved);
     let bent = deltas.iter().filter(|d| **d >= 2).count();
     let mean_delta = deltas.iter().sum::<u32>() as f64 / deltas.len() as f64;
 
@@ -713,6 +827,286 @@ fn the_volumetric_curvature_bends_interior_light() {
         "the interior differs from the flat pane by a mean of only {mean_delta:.2} levels; the \
          curvature is reaching the shader but bending the light by a fraction of a pixel, so nothing \
          visible happens across the window body"
+    );
+}
+
+/// A band declared farther away must refract further than a near one.
+///
+/// This is the parallax the depth banding exists for, and nothing above can see it: every earlier test
+/// uploads a single band at the calibrated fallback depth, so the *distance* the exit ray travels was a
+/// constant derived from the panel's own half-height. Two panels over the same backdrop moved
+/// identically no matter what was actually behind them.
+///
+/// So this is a differential in the band's depth alone: the same checkerboard uploaded as band 0 at 40px
+/// versus at 400px, at `curvature: 0.15, thickness: 15.0` (the same optics the curvature gate uses, so
+/// the front normal is tilted enough for the distance to matter). Everything else — the panel, the
+/// raster, the blur radius — is identical, so any pixel that moves moved because the ray travelled
+/// further.
+///
+/// Measured: 238 of the 260 interior samples move, by a mean of 13.39 levels and a maximum of 65. With
+/// `resolveBackdropDepth` forced to ignore its argument and always return the calibrated fallback — the
+/// pre-banding behaviour — 0 samples move and the mean delta is 0.00. The thresholds below sit between
+/// the two.
+#[wasm_bindgen_test]
+fn a_deeper_band_parallaxes_further_than_a_near_one() {
+    let optical = OpticalParams {
+        curvature: 0.15,
+        thickness: 15.0,
+        ..OpticalParams::default()
+    };
+
+    let backdrop = muted_checkerboard();
+    let near = render_bands(&[(&backdrop, 40.0)], optical);
+    let near_again = render_bands(&[(&backdrop, 40.0)], optical);
+    let far = render_bands(&[(&backdrop, 400.0)], optical);
+
+    // The control: the pipeline is deterministic, so the same depth twice must be byte-identical.
+    let control = interior_sample_deltas(&near, &near_again);
+    assert_eq!(
+        control.iter().copied().max().unwrap_or(0),
+        0,
+        "two renders of the identical 40px-depth frame disagree, so the differential below cannot \
+         attribute anything to the depth"
+    );
+
+    // Anti-vacuous: the backdrop must still carry structure through the blur where the body samples it,
+    // or displacing the sample point by any distance would land on the same colour.
+    let near_spread = mean_interior_channel_spread(&near);
+    assert!(
+        near_spread > 16.0,
+        "the near-band pass has a mean interior channel spread of only {near_spread:.1}; the \
+         checkerboard has been blurred into a flat field, so travelling further could not change a pixel"
+    );
+
+    let deltas = interior_sample_deltas(&near, &far);
+    let moved = deltas.iter().filter(|delta| **delta >= 2).count();
+    let mean_delta = deltas.iter().sum::<u32>() as f64 / deltas.len() as f64;
+
+    assert!(
+        moved * 2 > deltas.len(),
+        "only {moved} of {} interior samples moved between a 40px band and a 400px one (mean delta \
+         {mean_delta:.2}); the band depth is not reaching the refraction, so everything behind the \
+         glass still sits at one calibrated distance",
+        deltas.len()
+    );
+    assert!(
+        mean_delta >= 2.0,
+        "the 400px band differs from the 40px one by a mean of only {mean_delta:.2} levels; the depth \
+         reaches the shader but moves the sample point by a fraction of a pixel, so no differential \
+         parallax is visible"
+    );
+}
+
+/// A near band must paint *over* the far band where it covers it, not be averaged into it.
+///
+/// Band 0 is an opaque cool colour across the whole canvas; band 1 covers only the left half and is
+/// transparent over the right. If the bands were averaged — or composited in the wrong order — the left
+/// half would read as a blend and the right half would be tinted by a layer that does not cover it.
+/// Instead the left half must track band 1 and the right half band 0, which is what `accumulateBand`'s
+/// `mix(acc, band, band_alpha)` over a far-to-near walk buys.
+///
+/// The red-minus-blue sign is the discriminator: it survives the tint mix, the saturation scale and the
+/// brightness gain, all of which are monotonic in it, and it does not depend on absolute levels.
+#[wasm_bindgen_test]
+fn a_near_band_occludes_the_far_band_it_covers() {
+    const COOL: &str = "rgb(48, 72, 200)";
+    const WARM: &str = "rgb(200, 96, 32)";
+
+    let far = solid_canvas(COOL);
+    let near = left_half_canvas(WARM);
+    let quad = inset_quad();
+
+    let warmth = |pixels: &[u8], x_from: u32, x_to: u32| -> f64 {
+        let mut samples = Vec::new();
+        for y in (64..HEIGHT - 64).step_by(16) {
+            for x in (x_from..x_to).step_by(16) {
+                samples.push(dom_pixel(pixels, x, y));
+            }
+        }
+        samples
+            .iter()
+            .map(|p| f64::from(p[0]) - f64::from(p[2]))
+            .sum::<f64>()
+            / samples.len() as f64
+    };
+
+    // Sampled well clear of the halves' boundary: the blur chain's sigma is ~32px at the default radius,
+    // and the refraction moves the sample point on top of that.
+    let left = 64..160;
+    let right = 352..448;
+
+    // The control: with only the far band, both halves are the same cool colour, so any warmth
+    // difference between them in the banded frame came from band 1 and not from the panel's own shading.
+    let far_only = render_bands(
+        &[(&far, physics::AUTO_BACKDROP_DEPTH)],
+        OpticalParams::default(),
+    );
+    let control_left = warmth(&far_only, left.start, left.end);
+    let control_right = warmth(&far_only, right.start, right.end);
+    assert!(
+        control_left < 0.0 && control_right < 0.0,
+        "the far band alone must read cool on both halves, got left {control_left:.1} and right \
+         {control_right:.1}"
+    );
+
+    let banded = render_bands(
+        &[
+            (&far, physics::AUTO_BACKDROP_DEPTH),
+            (&near, physics::AUTO_BACKDROP_DEPTH),
+        ],
+        OpticalParams::default(),
+    );
+    let banded_left = warmth(&banded, left.start, left.end);
+    let banded_right = warmth(&banded, right.start, right.end);
+
+    assert!(
+        banded_left > 0.0,
+        "the covered half reads {banded_left:.1} red-minus-blue; the near band is not occluding the \
+         far one, so a layer floating over the wallpaper is being averaged into it"
+    );
+    assert!(
+        banded_right < 0.0,
+        "the uncovered half reads {banded_right:.1} red-minus-blue; the near band's transparent region \
+         is bleeding into where it does not cover, so its alpha is not gating the mix"
+    );
+    // And the uncovered half must be untouched by the near band, not merely still cool.
+    assert!(
+        (banded_right - control_right).abs() < 4.0,
+        "the uncovered half moved from {control_right:.1} to {banded_right:.1} when a band that does \
+         not cover it was added"
+    );
+    // Anti-vacuous: the panel interior must still be showing real content rather than a flat field.
+    let interior = interior_samples_of(&banded, &quad);
+    let spread = mean_channel_spread(&interior);
+    assert!(
+        spread > 16.0,
+        "the banded frame has a mean interior channel spread of only {spread:.1}, so the two bands' \
+         colours have been washed out and the comparison above means little"
+    );
+}
+
+/// Releasing a band must stop it being sampled at all.
+///
+/// A content layer that unmounts leaves its raster resident in the band's texture. If `has_content` did
+/// not gate `u_band_count`, the composite would keep refracting a stale snapshot of DOM that is no
+/// longer on the page. The frame after a release must therefore be byte-identical to one where the band
+/// was never uploaded.
+#[wasm_bindgen_test]
+fn releasing_a_band_stops_it_being_sampled() {
+    let far = muted_checkerboard();
+    let near = left_half_canvas("rgb(200, 96, 32)");
+
+    let render = |with_near: bool| -> Vec<u8> {
+        let canvas = create_canvas(WIDTH, HEIGHT);
+        let mut renderer =
+            WebGl2Renderer::new(&canvas, WIDTH, HEIGHT).expect("WebGl2Renderer::new failed");
+        renderer
+            .set_band_from_canvas(0, &far, 120.0)
+            .expect("uploading band 0 failed");
+        if with_near {
+            renderer
+                .set_band_from_canvas(1, &near, 40.0)
+                .expect("uploading band 1 failed");
+            assert!(
+                renderer.has_real_background(),
+                "two uploaded bands must count as a real backdrop"
+            );
+            renderer.release_bands_from(1);
+            assert!(
+                renderer.has_real_background(),
+                "releasing band 1 must leave band 0 sampled"
+            );
+        }
+        renderer
+            .update_quads(&[inset_quad()])
+            .expect("update_quads failed");
+        renderer.render().expect("render failed");
+        read_canvas(&request_context(&canvas))
+    };
+
+    let band_zero_only = render(false);
+    let released = render(true);
+
+    // Anti-vacuous: the near band really would have changed the frame had it stayed active. Without
+    // this, a released band and an ignored one look the same because neither ever mattered.
+    let still_active = render_bands(&[(&far, 120.0), (&near, 40.0)], OpticalParams::default());
+    let effect = interior_sample_deltas(&band_zero_only, &still_active);
+    assert!(
+        effect.iter().copied().max().unwrap_or(0) >= 2,
+        "adding the near band changed nothing, so this test cannot tell a released band from an \
+         unsampled one"
+    );
+
+    assert_eq!(
+        released, band_zero_only,
+        "the frame after release_bands_from(1) differs from a band-0-only frame, so a released band is \
+         still being refracted"
+    );
+}
+
+/// Two panels must each blur at their own radius.
+///
+/// The renderer used to blur once at the *mean* of every submitted quad's `blur_radius` and have the
+/// composite sample that single result, so a 2px panel and a 30px panel both rendered at 16px and looked
+/// identical — the "per-quad blurRadius is not honoured" limitation. Now the chain runs once per
+/// quantized radius, with that group's quads drawn in between.
+///
+/// [`mean_interior_luma_step`] is the measure, and each panel is compared against *itself* at the sharp
+/// radius rather than against its neighbour: the two positions sit over different parts of the
+/// checkerboard, and at an equal radius they already read 5.19 and 6.97, a 34% spread that no
+/// panel-against-panel threshold can see past.
+#[wasm_bindgen_test]
+fn two_panels_blur_at_their_own_radius() {
+    // Two panels side by side, comfortably non-overlapping: overlapping glass is unsupported, and with
+    // per-group draws an overlap would composite in radius order rather than submission order.
+    let panel = |x: f32, blur_radius: f32| GlassQuad {
+        x,
+        y: 32.0,
+        width: 216.0,
+        height: HEIGHT as f32 - 64.0,
+        corner_radius: 24.0,
+        _padding: [0.0; 3],
+        optical: OpticalParams {
+            blur_radius,
+            ..OpticalParams::default()
+        },
+    };
+    const SHARP: f32 = 2.0;
+    const FROSTED: f32 = 30.0;
+    let left = |blur_radius| panel(32.0, blur_radius);
+    let right = |blur_radius| panel(264.0, blur_radius);
+
+    let backdrop = muted_checkerboard();
+    let control = render_quads_over(&backdrop, &[left(SHARP), right(SHARP)]);
+    let differential = render_quads_over(&backdrop, &[left(SHARP), right(FROSTED)]);
+
+    let control_left = mean_interior_luma_step(&control, &left(SHARP));
+    let control_right = mean_interior_luma_step(&control, &right(SHARP));
+    // Anti-vacuous: there has to be interior detail for a wider radius to destroy. A flat backdrop, or a
+    // narrow radius that had already flattened it, would let the assertions below pass on nothing.
+    assert!(
+        control_left > 3.0 && control_right > 3.0,
+        "the control frame's panels read {control_left:.2} and {control_right:.2} mean interior luma \
+         step; the sharp radius has already flattened the checkerboard, so a wider one could not flatten \
+         it further"
+    );
+
+    let sharp = mean_interior_luma_step(&differential, &left(SHARP));
+    let frosted = mean_interior_luma_step(&differential, &right(FROSTED));
+    assert!(
+        control_right > frosted * 3.0,
+        "the {FROSTED}px panel reads {frosted:.2} mean interior luma step where the same panel at \
+         {SHARP}px read {control_right:.2} — a ratio of only {:.2}. The wider radius is not reaching \
+         this quad, which is the shared-blur limitation this replaces",
+        control_right / frosted.max(f64::EPSILON)
+    );
+    // And the sharp panel must be untouched by its neighbour's radius: it is drawn in its own group,
+    // against its own run of the chain. This is the half a *mean* radius could never satisfy — under the
+    // old code both panels would have moved to 16px together.
+    assert!(
+        (sharp - control_left).abs() / control_left < 0.1,
+        "the sharp panel moved from {control_left:.2} to {sharp:.2} when only its *neighbour's* radius \
+         changed, so the groups are still sharing one blurred backdrop"
     );
 }
 
