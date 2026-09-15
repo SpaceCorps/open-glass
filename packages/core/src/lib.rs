@@ -110,6 +110,8 @@ impl WasmGlassEngine {
         roughness: f32,
         saturation: f32,
         brightness: f32,
+        thickness: f32,
+        curvature: f32,
         tint_r: f32,
         tint_g: f32,
         tint_b: f32,
@@ -132,6 +134,8 @@ impl WasmGlassEngine {
                 roughness,
                 saturation,
                 brightness,
+                thickness,
+                curvature,
                 tint_color: [tint_r, tint_g, tint_b, tint_a],
             },
         });

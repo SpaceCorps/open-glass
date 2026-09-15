@@ -60,6 +60,8 @@ struct CompositeUniforms {
     roughness: Option<WebGlUniformLocation>,
     saturation: Option<WebGlUniformLocation>,
     brightness: Option<WebGlUniformLocation>,
+    thickness: Option<WebGlUniformLocation>,
+    curvature: Option<WebGlUniformLocation>,
     tint_color: Option<WebGlUniformLocation>,
 }
 
@@ -300,6 +302,8 @@ impl WebGl2Renderer {
             roughness: gl.get_uniform_location(&composite_program, "u_roughness"),
             saturation: gl.get_uniform_location(&composite_program, "u_saturation"),
             brightness: gl.get_uniform_location(&composite_program, "u_brightness"),
+            thickness: gl.get_uniform_location(&composite_program, "u_thickness"),
+            curvature: gl.get_uniform_location(&composite_program, "u_curvature"),
             tint_color: gl.get_uniform_location(&composite_program, "u_tint_color"),
         };
 
@@ -533,6 +537,8 @@ impl WebGl2Renderer {
             gl.uniform1f(uniforms.roughness.as_ref(), quad.optical.roughness);
             gl.uniform1f(uniforms.saturation.as_ref(), quad.optical.saturation);
             gl.uniform1f(uniforms.brightness.as_ref(), quad.optical.brightness);
+            gl.uniform1f(uniforms.thickness.as_ref(), quad.optical.thickness);
+            gl.uniform1f(uniforms.curvature.as_ref(), quad.optical.curvature);
             let tint = quad.optical.tint_color;
             gl.uniform4f(
                 uniforms.tint_color.as_ref(),
@@ -693,6 +699,8 @@ mod tests {
             "u_roughness",
             "u_saturation",
             "u_brightness",
+            "u_thickness",
+            "u_curvature",
             "u_tint_color",
         ] {
             assert!(

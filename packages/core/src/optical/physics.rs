@@ -40,6 +40,24 @@ pub struct OpticalParams {
     /// with no padding slot left. The WebGL2 upload is per-field `uniform1f`, so nothing depends on a
     /// 16-byte multiple today, but a `std140`/`std430` buffer upload will need explicit padding.
     pub brightness: f32,
+    /// Physical thickness of the glass slab in pixels: the distance the refracted ray travels between
+    /// the front/top entrance interface and the rear/bottom exit interface.
+    ///
+    /// This is what makes the panel a *slab* rather than a thin film. The entrance refraction only
+    /// gives the ray a direction; a direction becomes a visible displacement only once it propagates,
+    /// and this is the distance it propagates over (see [`dual_surface_refraction_offset`]). At `0.0`
+    /// the two interfaces coincide and the slab term vanishes, leaving the body lens as the only
+    /// source of bending.
+    pub thickness: f32,
+    /// Volumetric lens curvature of the glass body: the sag of the convex dome spanning the panel
+    /// interior, as a fraction of the panel's half-size.
+    ///
+    /// The previous shader clamped every interior pixel's surface normal to `(0, 0, 1)` once it was
+    /// more than `max(corner_radius, 8)` pixels inside the boundary, so the entire window body bent no
+    /// light at all. This term is the body's own normal field: it tilts *outward* from the panel centre
+    /// (see [`volumetric_lens_normal`]), which is the sign that converges the transmitted rays and
+    /// therefore magnifies — a plano-convex lens, not a flat pane.
+    pub curvature: f32,
     /// Surface glass tint color (RGBA normalized 0.0 - 1.0).
     pub tint_color: [f32; 4],
 }
@@ -66,6 +84,14 @@ impl Default for OpticalParams {
             // rounded onto the playground slider's 0.05 grid. The additive sheen is deliberately not
             // scaled, so the achieved gain lands slightly under the nominal one.
             brightness: 1.5,
+            // A standard slab: thick enough that the bevel band's steep surface tilt translates into a
+            // few pixels of visible displacement, thin enough that the body stays a window rather than
+            // a paperweight. The playground slider spans 0 (thin sheet) to 30 (heavy glass).
+            thickness: 10.0,
+            // Subtle macOS parity. `curvature * BODY_LENS_DEPTH_SCALE` sets the body magnification, and
+            // 0.10 puts the steepest ring of the dome at ~2.6% of the panel half-size — continuous,
+            // dynamic bending across the whole body, without the fisheye of a pronounced lens.
+            curvature: 0.10,
             tint_color: [1.0, 1.0, 1.0, 0.12],
         }
     }
@@ -100,6 +126,106 @@ pub fn snell_refraction_vector(incident: Vec3, normal: Vec3, n1: f32, n2: f32) -
         let refracted = eta * incident + (eta * cos_theta_i - k.sqrt()) * n;
         Some(refracted.normalize())
     }
+}
+
+/// Effective optical depth of the backdrop behind the rear face, as a multiple of the panel's
+/// half-height.
+///
+/// The composite samples a single depth-less blurred raster, so there is no real object distance to
+/// propagate the exit ray over — and without one the body lens is invisible: at `thickness = 10` the
+/// dome's steepest ring displaces the sample point by 0.13px, which is the flat interior this whole
+/// model replaces. Making the depth proportional to the panel's own half-height is what keeps the
+/// magnification *scale-invariant*: the same normalized position on a small panel and a large one is
+/// pulled by the same percentage of its half-size, instead of a big window reading flat.
+///
+/// At `curvature = 0.10` this puts the steepest ring of the dome (|u| = 1/sqrt(3)) at ~2.6% of the
+/// half-size, i.e. the "subtle, approximately 2-3% centre magnification" macOS parity target.
+pub const BODY_LENS_DEPTH_SCALE: f32 = 1.2;
+
+/// Surface normal of the convex dome that spans the glass body, at panel-relative position `p`.
+///
+/// The dome is `z = curvature * (1 - |u|^2)` over the normalized interior coordinate
+/// `u = p / half_size`, so its gradient tilts the normal **outward** from the centre, growing from
+/// zero at the centre to zero again at the boundary and peaking at `|u| = 1/sqrt(3)`.
+///
+/// Outward is the sign that magnifies. Entering a denser medium bends the ray *towards* the normal,
+/// which for an outward-tilting normal means towards the panel axis: the transmitted rays converge, so
+/// the body samples a smaller region of the backdrop and shows it larger. (An inward-tilting normal
+/// gives the opposite — a diverging, minifying pane.)
+pub fn volumetric_lens_normal(p: Vec2, half_size: Vec2, curvature: f32) -> Vec3 {
+    let half = Vec2::new(half_size.x.abs().max(1.0), half_size.y.abs().max(1.0));
+    let u = p / half;
+    // Clamped at the boundary so the dome never inverts outside the panel, where the SDF bevel normal
+    // takes over anyway.
+    let dome = (1.0 - u.length_squared()).max(0.0);
+    let tilt = u * dome * curvature;
+    Vec3::new(tilt.x, tilt.y, 1.0).normalize()
+}
+
+/// Screen-space translation, in pixels, of a ray travelling `depth` pixels away from the viewer.
+///
+/// `dir.z` is negative for a ray heading into the screen; the `0.2` floor is the same grazing-ray guard
+/// the shaders use, so a ray refracted almost parallel to the surface cannot produce an unbounded
+/// offset.
+fn screen_translation(dir: Vec3, depth: f32) -> Vec2 {
+    Vec2::new(dir.x, dir.y) / (-dir.z).max(0.2) * depth
+}
+
+/// Total screen-space offset of the backdrop point seen through a glass slab, in pixels.
+///
+/// Three stages, which is what makes this *dual*-surface rather than the single thin-film
+/// approximation it replaces:
+///
+/// 1. **Entry.** `incident` refracts at the front/top interface `normal_front` from air into the glass
+///    (Snell's law, via [`snell_refraction_vector`]).
+/// 2. **Internal propagation.** The refracted ray crosses the slab, translating the sample point by
+///    `thickness` pixels' worth of its own direction.
+/// 3. **Exit.** It refracts again at the rear/bottom interface `normal_rear` from glass back into air —
+///    the interface that can total-internally-reflect, since this is the dense-to-rare direction — and
+///    travels on to the backdrop.
+///
+/// Both normals point towards the viewer (`+z`), as the shaders' do. The backdrop is taken to sit one
+/// slab thickness behind the rear face; [`dual_surface_refraction_offset_at_depth`] takes that distance
+/// explicitly, which is what the shaders use with [`BODY_LENS_DEPTH_SCALE`].
+///
+/// Pixels rather than UV: converting to UV needs a resolution this signature does not carry, and the
+/// shaders divide by `u_resolution.y` at exactly this point.
+pub fn dual_surface_refraction_offset(
+    incident: Vec3,
+    normal_front: Vec3,
+    normal_rear: Vec3,
+    ior: f32,
+    thickness: f32,
+) -> Vec2 {
+    dual_surface_refraction_offset_at_depth(
+        incident,
+        normal_front,
+        normal_rear,
+        ior,
+        thickness,
+        thickness,
+    )
+}
+
+/// [`dual_surface_refraction_offset`] with the distance from the rear face to the backdrop given
+/// explicitly.
+///
+/// On total internal reflection at the exit interface the ray is kept on its internal heading rather
+/// than dropped: the shaders light that band as an inner bevel highlight, and a zeroed direction here
+/// would read as "no displacement at all" precisely where the glass bends light hardest.
+pub fn dual_surface_refraction_offset_at_depth(
+    incident: Vec3,
+    normal_front: Vec3,
+    normal_rear: Vec3,
+    ior: f32,
+    thickness: f32,
+    backdrop_depth: f32,
+) -> Vec2 {
+    let ior = ior.max(1.0);
+    let internal =
+        snell_refraction_vector(incident, normal_front, 1.0, ior).unwrap_or(incident.normalize());
+    let exit = snell_refraction_vector(internal, normal_rear, ior, 1.0).unwrap_or(internal);
+    screen_translation(internal, thickness) + screen_translation(exit, backdrop_depth)
 }
 
 /// Calculate Fresnel reflectance using Schlick's approximation.
@@ -412,13 +538,174 @@ mod tests {
 
     #[test]
     fn test_optical_params_layout_matches_the_uniform_upload() {
-        // 7 leading f32 + saturation + brightness + a 4-float tint = 52 bytes. The point is that the
-        // layout the GPU uniform upload assumes is pinned, not that the number never changes: adding
-        // `brightness` grew it by one float, and the reserved padding slot `saturation` took is gone.
-        // Safe today only because the WebGL2 composite uploads per field (`uniform1f`) rather than
-        // memcpying the struct into a std140 buffer.
-        assert_eq!(std::mem::size_of::<OpticalParams>(), 52);
+        // 7 leading f32 + saturation + brightness + thickness + curvature + a 4-float tint = 60 bytes.
+        // The point is that the layout the GPU uniform upload assumes is pinned, not that the number
+        // never changes: `brightness` grew it from 48 to 52 and took the last reserved padding slot,
+        // and the dual-surface pair grew it from 52 to 60. Safe today only because the WebGL2 composite
+        // uploads per field (`uniform1f`) rather than memcpying the struct into a std140 buffer — a
+        // std140/std430 upload would need 4 bytes of explicit tail padding to reach a 16-byte multiple.
+        assert_eq!(std::mem::size_of::<OpticalParams>(), 60);
         assert_eq!(std::mem::align_of::<OpticalParams>(), 4);
+    }
+
+    #[test]
+    fn test_default_thickness_and_curvature() {
+        let default = OpticalParams::default();
+        assert!((default.thickness - 10.0).abs() < 1e-6);
+        assert!((default.curvature - 0.10).abs() < 1e-6);
+        // Both must be non-zero for the body to bend any light at all: `thickness` is the lever arm the
+        // entry refraction propagates over, `curvature` is the only source of interior surface tilt.
+        assert!(default.thickness > 0.0);
+        assert!(default.curvature > 0.0);
+    }
+
+    #[test]
+    fn test_volumetric_lens_normal_magnification() {
+        let half_size = Vec2::new(200.0, 120.0);
+        let curvature = 0.10;
+
+        // Dead centre: the dome's apex, so the normal faces the viewer exactly.
+        let centre = volumetric_lens_normal(Vec2::ZERO, half_size, curvature);
+        assert!(centre.x.abs() < 1e-6 && centre.y.abs() < 1e-6);
+        assert!((centre.z - 1.0).abs() < 1e-6);
+
+        // Off-centre: the normal tilts *outward*, i.e. the same direction as the offset from centre.
+        // This is the convex-dome sign; an inward tilt would be a diverging pane.
+        let right = volumetric_lens_normal(Vec2::new(100.0, 0.0), half_size, curvature);
+        assert!(right.x > 0.0, "the dome normal must tilt away from centre");
+        assert!(right.y.abs() < 1e-6);
+        let below = volumetric_lens_normal(Vec2::new(0.0, 60.0), half_size, curvature);
+        assert!(below.y > 0.0);
+
+        // The tilt peaks at |u| = 1/sqrt(3) and returns to zero at the boundary, where the SDF bevel
+        // normal takes over.
+        let peak = volumetric_lens_normal(
+            Vec2::new(half_size.x / 3.0f32.sqrt(), 0.0),
+            half_size,
+            curvature,
+        );
+        assert!(peak.x > right.x);
+        let boundary = volumetric_lens_normal(Vec2::new(half_size.x, 0.0), half_size, curvature);
+        assert!(boundary.x.abs() < 1e-6 && (boundary.z - 1.0).abs() < 1e-6);
+
+        // Zero curvature is a flat pane everywhere, which is the "flat slab, thickness only" profile.
+        let flat = volumetric_lens_normal(Vec2::new(100.0, 60.0), half_size, 0.0);
+        assert!((flat.z - 1.0).abs() < 1e-6);
+
+        // And the point of the outward tilt: the transmitted ray converges towards the panel axis, so
+        // the body samples *inwards* and magnifies. `offset.x < 0` at a point right of centre is that.
+        let offset = dual_surface_refraction_offset(
+            Vec3::new(0.0, 0.0, -1.0),
+            peak,
+            Vec3::new(0.0, 0.0, 1.0),
+            1.52,
+            10.0,
+        );
+        assert!(
+            offset.x < 0.0,
+            "a convex dome must pull the sample point towards the centre (magnify), got {offset:?}"
+        );
+    }
+
+    #[test]
+    fn test_dual_surface_refraction_displacement() {
+        let incident = Vec3::new(0.0, 0.0, -1.0);
+        let flat = Vec3::new(0.0, 0.0, 1.0);
+        // A front surface tilted like the dome's steepest ring, and a flat rear face (plano-convex).
+        let tilted = Vec3::new(0.04, 0.0, 1.0).normalize();
+
+        // Thickness is what turns a refracted *direction* into a visible displacement.
+        let thick = dual_surface_refraction_offset(incident, tilted, flat, 1.52, 12.0);
+        assert!(
+            thick.length() > 0.0,
+            "a tilted interface with thickness > 0 must displace the sample point"
+        );
+        let thin = dual_surface_refraction_offset(incident, tilted, flat, 1.52, 4.0);
+        assert!(
+            thick.length() > thin.length(),
+            "a thicker slab must displace further: {thick:?} vs {thin:?}"
+        );
+        assert_eq!(
+            dual_surface_refraction_offset(incident, tilted, flat, 1.52, 0.0),
+            Vec2::ZERO,
+            "a zero-thickness slab has no internal path and no gap behind it, so nothing displaces"
+        );
+
+        // Normal incidence on parallel faces: the ray passes straight through, exactly as through a
+        // window pane held square to the eye.
+        let square = dual_surface_refraction_offset(incident, flat, flat, 1.52, 20.0);
+        assert!(
+            square.length() < 1e-6,
+            "expected no displacement, got {square:?}"
+        );
+
+        // The exit interface is the dense-to-rare one, so it *amplifies* the deviation the entry
+        // interface introduced. Compare the full dual-surface offset against the internal leg alone.
+        let internal_only = screen_translation(
+            snell_refraction_vector(incident, tilted, 1.0, 1.52).expect("entry cannot TIR"),
+            12.0,
+        );
+        assert!(
+            thick.length() > internal_only.length() * 1.5,
+            "the rear interface must bend the ray further out, not merely pass it through: \
+             {thick:?} vs {internal_only:?}"
+        );
+
+        // Air-to-air is a no-op whatever the geometry: no interface, no bending.
+        let no_glass = dual_surface_refraction_offset(incident, tilted, flat, 1.0, 12.0);
+        assert!(
+            no_glass.length() < 1e-6,
+            "ior 1.0 is not glass, so nothing should bend: {no_glass:?}"
+        );
+    }
+
+    #[test]
+    fn test_dual_surface_exit_total_internal_reflection_is_survivable() {
+        // A steeply tilted rear face sends the internal ray past the critical angle of the glass-air
+        // interface. The offset must stay finite and keep the internal heading rather than collapsing to
+        // zero, which is what the shaders' inner-bevel band relies on.
+        let incident = Vec3::new(0.0, 0.0, -1.0);
+        let front = Vec3::new(0.5, 0.0, 1.0).normalize();
+        let steep_rear = Vec3::new(0.9, 0.0, 0.3).normalize();
+        assert!(
+            snell_refraction_vector(
+                snell_refraction_vector(incident, front, 1.0, 1.52).unwrap(),
+                steep_rear,
+                1.52,
+                1.0,
+            )
+            .is_none(),
+            "this geometry is meant to total-internally-reflect; the test is vacuous otherwise"
+        );
+
+        let offset = dual_surface_refraction_offset(incident, front, steep_rear, 1.52, 10.0);
+        assert!(offset.is_finite());
+        assert!(offset.length() > 0.0);
+    }
+
+    #[test]
+    fn test_body_lens_depth_scale_lands_on_the_macos_magnification_target() {
+        // The calibration behind BODY_LENS_DEPTH_SCALE, asserted rather than left in prose: at the
+        // default curvature the steepest ring of the dome must pull the sample point by 2-3% of the
+        // panel half-size, which is the "subtle macOS parity" profile.
+        let half_size = Vec2::new(200.0, 120.0);
+        let params = OpticalParams::default();
+        let p = Vec2::new(half_size.x / 3.0f32.sqrt(), 0.0);
+        let offset = dual_surface_refraction_offset_at_depth(
+            Vec3::new(0.0, 0.0, -1.0),
+            volumetric_lens_normal(p, half_size, params.curvature),
+            Vec3::new(0.0, 0.0, 1.0),
+            params.ior,
+            params.thickness,
+            half_size.y * BODY_LENS_DEPTH_SCALE,
+        );
+        let magnification = offset.length() / half_size.y;
+        assert!(
+            (0.02..=0.03).contains(&magnification),
+            "the default body lens magnifies by {:.1}% of the panel half-size, outside the 2-3% macOS \
+             parity band; BODY_LENS_DEPTH_SCALE or the default curvature needs recalibrating",
+            magnification * 100.0
+        );
     }
 
     #[test]
