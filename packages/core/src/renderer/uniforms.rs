@@ -157,8 +157,8 @@ pub(crate) fn normalized_glass_bounds(quad: &GlassQuad, width: u32, height: u32)
 }
 
 /// WGSL source of the composite pass, read here only so the tests can assert its uniform block
-/// matches [`GlassCompositeUniforms`]. Nothing compiles it yet — see the README's "Not implemented
-/// yet" list.
+/// matches [`GlassCompositeUniforms`]. `tests/wgsl_shaders.rs` is where a real shader compiler
+/// (naga) actually parses and validates it; this file only pattern-matches the source text.
 #[cfg(test)]
 const COMPOSITE_WGSL: &str = include_str!("../shaders/glass_composite.wgsl");
 
@@ -225,8 +225,11 @@ mod tests {
 
     #[test]
     fn test_composite_uniforms_match_the_wgsl_declaration() {
-        // Nothing compiles the WGSL (no naga, no wgpu), so a source-text assertion is the only thing
-        // that can make the Rust struct and the shader provably one layout. Same pattern as
+        // `tests/wgsl_shaders.rs` now asserts the same struct's byte offsets against naga's own
+        // layout, which is the authority on where the shader actually reads each field from. This
+        // text assertion keeps a narrower job that test doesn't cover: declaration *order* and WGSL
+        // type *spelling* (`vec4<f32>` vs four scalars share an offset but not a type), with a
+        // failure message about a swapped field name rather than a byte offset. Same pattern as
         // `test_composite_fragment_shader_declares_expected_uniforms` in webgl2.rs.
         let expected: [(&str, &str); 15] = [
             ("ior", "f32"),
