@@ -3,12 +3,14 @@ import React, {
   useContext,
   useState,
   type ButtonHTMLAttributes,
+  type FocusEvent,
   type PointerEvent,
   type ReactNode,
 } from "react";
 import type { OpticalParams } from "@open-glass/core";
 import { GlassContext } from "../context/GlassContext";
 import { useGlassElement } from "../hooks/useGlassElement";
+import { useFocusRing } from "../hooks/useFocusRing";
 import { glassHandoverStyle } from "../surface";
 
 export interface GlassButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -31,6 +33,9 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
       style,
       onPointerMove,
       onPointerLeave,
+      onPointerDown,
+      onFocus,
+      onBlur,
       ...rest
     },
     ref,
@@ -43,6 +48,8 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
     const [coords, setCoords] = useState<{ x: number; y: number } | null>(null);
     const [isPressed, setIsPressed] = useState(false);
 
+    const { isFocusVisible, focusRingHandlers } = useFocusRing<HTMLButtonElement>();
+
     // Same GPU handover as GlassCard / GlassWindow: the button registers a quad, so once the renderer
     // composites, keeping the CSS blur on would stack two different glass models in one scene.
     const context = useContext(GlassContext);
@@ -54,7 +61,8 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
       readyBackground:
         variant === "primary" ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.04)",
       cssBackdrop: "blur(16px)",
-      transition: style?.transition ?? "transform 0.1s ease, box-shadow 0.15s ease",
+      transition:
+        style?.transition ?? "transform 0.1s ease, box-shadow 0.15s ease, border-color 0.15s ease",
     });
 
     const handlePointerMove = (e: PointerEvent<HTMLButtonElement>) => {
@@ -72,9 +80,38 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
       onPointerLeave?.(e);
     };
 
+    const handlePointerDown = (e: PointerEvent<HTMLButtonElement>) => {
+      focusRingHandlers.onPointerDown(e);
+      setIsPressed(true);
+      onPointerDown?.(e);
+    };
+
+    const handleFocus = (e: FocusEvent<HTMLButtonElement>) => {
+      focusRingHandlers.onFocus(e);
+      onFocus?.(e);
+    };
+
+    const handleBlur = (e: FocusEvent<HTMLButtonElement>) => {
+      focusRingHandlers.onBlur(e);
+      onBlur?.(e);
+    };
+
     // Merge rather than pick a winner: a caller's transform and the press scale must coexist.
     const pressScale = isPressed ? "scale(0.97)" : "scale(1)";
     const combinedTransform = style?.transform ? `${style.transform} ${pressScale}` : pressScale;
+
+    // Stacked border + box-shadow ring, never `outline` — once ready the button sets
+    // `backdrop-filter: none` via `handover`, so an outline would draw straight over GPU-composited
+    // pixels with no guaranteed contrast.
+    const border = isFocusVisible
+      ? "1px solid rgba(160, 205, 255, 0.95)"
+      : "1px solid rgba(255, 255, 255, 0.35)";
+    const restingBoxShadow = isPressed
+      ? "0 2px 6px rgba(0, 0, 0, 0.15)"
+      : "0 6px 20px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.08)";
+    const boxShadow = isFocusVisible
+      ? `${restingBoxShadow}, 0 0 0 1px rgba(10, 15, 30, 0.85), 0 0 0 3px rgba(120, 180, 255, 0.65)`
+      : restingBoxShadow;
 
     return (
       <button
@@ -89,8 +126,10 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
         className={`open-glass-button ${variant} ${className ?? ""}`}
         onPointerMove={handlePointerMove}
         onPointerLeave={handlePointerLeave}
-        onPointerDown={() => setIsPressed(true)}
+        onPointerDown={handlePointerDown}
         onPointerUp={() => setIsPressed(false)}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
         style={{
           position: "relative",
           display: "inline-flex",
@@ -99,18 +138,15 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
           gap: "8px",
           padding: "0.625rem 1.25rem",
           borderRadius: `${cornerRadius}px`,
-          border: "1px solid rgba(255, 255, 255, 0.35)",
+          border,
           ...handover,
-          boxShadow: isPressed
-            ? "0 2px 6px rgba(0, 0, 0, 0.15)"
-            : "0 6px 20px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.08)",
+          boxShadow,
           color: "#ffffff",
           fontWeight: 500,
           fontSize: "0.9375rem",
           cursor: "pointer",
           overflow: "hidden",
           userSelect: "none",
-          outline: "none",
           ...style,
           // After `...style`: the caller's transform is already folded into combinedTransform and the
           // caller's transition into the handover, and spreading it last would drop the press scale

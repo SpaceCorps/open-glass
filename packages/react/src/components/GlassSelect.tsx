@@ -91,6 +91,11 @@ export const GlassSelect = forwardRef<HTMLSelectElement, GlassSelectProps>(
       onPointerDown?.(event);
     };
 
+    const surface = fieldSurface(
+      isRenderReady,
+      style?.transition ?? "border-color 0.15s ease, box-shadow 0.15s ease",
+    );
+
     return (
       <div
         className="open-glass-select-field"
@@ -132,11 +137,11 @@ export const GlassSelect = forwardRef<HTMLSelectElement, GlassSelectProps>(
               fontSize: "0.9375rem",
               fontFamily: "inherit",
               cursor: "pointer",
-              transition: "border-color 0.15s ease, box-shadow 0.15s ease",
-              ...fieldSurface(isRenderReady),
+              ...surface,
               ...focusRing(isFocusVisible),
               ...(disabled ? disabledSurface : null),
               ...style,
+              transition: surface.transition,
             }}
             {...rest}
           >

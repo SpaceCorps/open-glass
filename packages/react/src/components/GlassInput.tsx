@@ -82,6 +82,11 @@ export const GlassInput = forwardRef<HTMLInputElement, GlassInputProps>(
       onPointerDown?.(event);
     };
 
+    const surface = fieldSurface(
+      isRenderReady,
+      style?.transition ?? "border-color 0.15s ease, box-shadow 0.15s ease",
+    );
+
     return (
       <div
         className="open-glass-input-field"
@@ -117,11 +122,11 @@ export const GlassInput = forwardRef<HTMLInputElement, GlassInputProps>(
             color: "rgba(255, 255, 255, 0.95)",
             fontSize: "0.9375rem",
             fontFamily: "inherit",
-            transition: "border-color 0.15s ease, box-shadow 0.15s ease",
-            ...fieldSurface(isRenderReady),
+            ...surface,
             ...focusRing(isFocusVisible, isInvalid),
             ...(disabled ? disabledSurface : null),
             ...style,
+            transition: surface.transition,
           }}
           {...rest}
         />

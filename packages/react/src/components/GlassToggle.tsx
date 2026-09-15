@@ -110,6 +110,11 @@ export const GlassToggle = forwardRef<HTMLButtonElement, GlassToggleProps>(
 
     const ring = focusRing(isFocusVisible);
 
+    const surface = fieldSurface(
+      isRenderReady,
+      style?.transition ?? "border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease",
+    );
+
     return (
       <button
         ref={(node) => {
@@ -139,8 +144,7 @@ export const GlassToggle = forwardRef<HTMLButtonElement, GlassToggleProps>(
           padding: 0,
           borderRadius: `${cornerRadius}px`,
           cursor: "pointer",
-          transition: "border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease",
-          ...fieldSurface(isRenderReady),
+          ...surface,
           ...ring,
           // The checked track tints on top of the surface, so keep it after `fieldSurface`.
           ...(isChecked
@@ -150,6 +154,7 @@ export const GlassToggle = forwardRef<HTMLButtonElement, GlassToggleProps>(
             : null),
           ...(disabled ? disabledSurface : null),
           ...style,
+          transition: surface.transition,
         }}
         {...rest}
       >

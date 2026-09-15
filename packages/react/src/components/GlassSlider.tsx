@@ -143,6 +143,11 @@ export const GlassSlider = forwardRef<HTMLInputElement, GlassSliderProps>(
       onPointerDown?.(event);
     };
 
+    const surface = fieldSurface(
+      isRenderReady,
+      style?.transition ?? "border-color 0.15s ease, box-shadow 0.15s ease",
+    );
+
     return (
       <div
         className="open-glass-slider-field"
@@ -192,11 +197,11 @@ export const GlassSlider = forwardRef<HTMLInputElement, GlassSliderProps>(
             boxSizing: "border-box",
             borderRadius: `${cornerRadius}px`,
             cursor: "pointer",
-            transition: "border-color 0.15s ease, box-shadow 0.15s ease",
-            ...fieldSurface(isRenderReady),
+            ...surface,
             ...focusRing(isFocusVisible),
             ...(disabled ? disabledSurface : null),
             ...style,
+            transition: surface.transition,
           }}
           {...rest}
         />

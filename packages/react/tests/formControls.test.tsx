@@ -52,35 +52,37 @@ const controls = [
     role: "textbox",
     cornerRadius: 12,
     tagName: "INPUT",
-    render: () => <GlassInput label="Name" />,
+    render: (style?: React.CSSProperties) => <GlassInput label="Name" style={style} />,
   },
   {
     name: "GlassToggle",
     role: "switch",
     cornerRadius: 15,
     tagName: "BUTTON",
-    render: () => <GlassToggle label="Wi-Fi" />,
+    render: (style?: React.CSSProperties) => <GlassToggle label="Wi-Fi" style={style} />,
   },
   {
     name: "GlassSlider",
     role: "slider",
     cornerRadius: 8,
     tagName: "INPUT",
-    render: () => <GlassSlider label="Volume" />,
+    render: (style?: React.CSSProperties) => <GlassSlider label="Volume" style={style} />,
   },
   {
     name: "GlassCheckbox",
     role: "checkbox",
     cornerRadius: 6,
     tagName: "INPUT",
-    render: () => <GlassCheckbox label="Analytics" />,
+    render: (style?: React.CSSProperties) => <GlassCheckbox label="Analytics" style={style} />,
   },
   {
     name: "GlassSelect",
     role: "combobox",
     cornerRadius: 12,
     tagName: "SELECT",
-    render: () => <GlassSelect label="Theme" options={selectOptions} />,
+    render: (style?: React.CSSProperties) => (
+      <GlassSelect label="Theme" options={selectOptions} style={style} />
+    ),
   },
 ] as const;
 
@@ -149,6 +151,30 @@ describe("Glass form controls — semantics and glass contract", () => {
       });
       expect(document.activeElement).toBe(el);
       expect(el.getAttribute("tabindex")).not.toBe("-1");
+    });
+  }
+});
+
+describe("Glass form controls — readiness handover", () => {
+  // Plan 00653 fixed this abrupt-flash defect for the panel components with `glassHandoverStyle`;
+  // the five form controls were landed in parallel by Plan 00652 and stayed un-routed through it.
+  for (const control of controls) {
+    for (const isRenderReady of [false, true]) {
+      it(`${control.name} includes the 260ms handover transition when isRenderReady is ${isRenderReady}`, () => {
+        render(
+          <GlassContext.Provider value={mockContext({ isRenderReady })}>
+            {control.render()}
+          </GlassContext.Provider>,
+        );
+        expect(screen.getByRole(control.role).style.transition).toMatch(/background-color \d+ms/);
+      });
+    }
+
+    it(`${control.name} composes a caller-provided style.transition with the handover transition`, () => {
+      render(control.render({ transition: "opacity 1s ease" }));
+      const el = screen.getByRole(control.role);
+      expect(el.style.transition).toContain("opacity 1s ease");
+      expect(el.style.transition).toMatch(/background-color \d+ms/);
     });
   }
 });

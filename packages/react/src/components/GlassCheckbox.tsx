@@ -117,6 +117,11 @@ export const GlassCheckbox = forwardRef<HTMLInputElement, GlassCheckboxProps>(
       onPointerDown?.(event);
     };
 
+    const surface = fieldSurface(
+      isRenderReady,
+      style?.transition ?? "border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease",
+    );
+
     const input = (
       <input
         ref={(node) => {
@@ -148,8 +153,7 @@ export const GlassCheckbox = forwardRef<HTMLInputElement, GlassCheckboxProps>(
           boxSizing: "border-box",
           borderRadius: `${cornerRadius}px`,
           cursor: "pointer",
-          transition: "border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease",
-          ...fieldSurface(isRenderReady),
+          ...surface,
           ...focusRing(isFocusVisible),
           ...(isChecked || indeterminate
             ? {
@@ -158,6 +162,7 @@ export const GlassCheckbox = forwardRef<HTMLInputElement, GlassCheckboxProps>(
             : null),
           ...(disabled ? disabledSurface : null),
           ...style,
+          transition: surface.transition,
         }}
         {...rest}
       />
