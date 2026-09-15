@@ -284,6 +284,46 @@ export const ControlsPanel: React.FC<ControlsPanelProps> = ({
           </div>
         </div>
 
+        {/* Slab Thickness — the depth the refracted ray travels between the front and rear faces. */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+            <span>Glass Slab Thickness</span>
+            <span style={{ fontFamily: "monospace" }}>{optical.thickness.toFixed(0)}px</span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="30"
+            step="1"
+            value={optical.thickness}
+            onChange={(e) => update("thickness", Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ fontSize: "0.6875rem", color: "#888", marginTop: "2px" }}>
+            0px Thin Sheet · 10px Standard Slab · 25px Heavy Glass
+          </div>
+        </div>
+
+        {/* Volumetric Lens Curvature — drag the window at 0.00 and at 0.25 to see the body lensing. */}
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+            <span>Volumetric Lens Curvature</span>
+            <span style={{ fontFamily: "monospace" }}>{optical.curvature.toFixed(2)}</span>
+          </div>
+          <input
+            type="range"
+            min="0.00"
+            max="0.30"
+            step="0.01"
+            value={optical.curvature}
+            onChange={(e) => update("curvature", Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ fontSize: "0.6875rem", color: "#888", marginTop: "2px" }}>
+            0.00 Flat · 0.10 macOS Parity · 0.25 Magnified Lens
+          </div>
+        </div>
+
         {/* Tint Opacity */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>

@@ -70,6 +70,13 @@ export const DEFAULT_OPTICAL_PARAMS: Required<OpticalParams> = {
   // reading 1.4x darker. Must stay in step with `OpticalParams::default().brightness` in
   // `packages/core/src/optical/physics.rs`.
   brightness: 1.5,
+  // A standard slab: thick enough that the ray's internal travel shifts the backdrop it lands on,
+  // thin enough that the panel still reads as a pane rather than a block.
+  thickness: 10.0,
+  // Subtle macOS parity: the body magnifies the backdrop by ~2.5% of the panel's half-size, which is
+  // the continuous body lensing Apple Glass shows without turning the window into a fisheye. Must stay
+  // in step with `OpticalParams::default()` in `packages/core/src/optical/physics.rs`.
+  curvature: 0.1,
   tintColor: [1.0, 1.0, 1.0, 0.12],
 };
 
@@ -304,6 +311,8 @@ class GlassEngineImpl implements GlassEngine {
             optical.roughness,
             optical.saturation,
             optical.brightness,
+            optical.thickness,
+            optical.curvature,
             optical.tintColor[0],
             optical.tintColor[1],
             optical.tintColor[2],

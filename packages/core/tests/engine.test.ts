@@ -132,12 +132,13 @@ describe("packages/core engine negotiation", () => {
       // A confirmed upload into a live renderer is the whole readiness condition.
       expect(engine.isRenderReady?.() ?? false).toBe(true);
 
-      // `add_quad` is positional and must mirror `OpticalParams`' Rust field order, with `saturation`
-      // then `brightness` between `roughness` and the four tint channels. A swap would feed the chroma
-      // boost or the exposure gain into a tint channel and `updateQuads` swallows every throw from this
-      // call, so nothing else here would notice; the browser tests' chroma and luma differentials are
-      // the other half of this guard. Both overrides are deliberately values no tint channel holds
-      // (1.0, 1.0, 1.0, 0.12), so any adjacent transposition changes this array.
+      // `add_quad` is positional and must mirror `OpticalParams`' Rust field order, with `saturation`,
+      // `brightness`, `thickness` then `curvature` between `roughness` and the four tint channels. A
+      // swap would feed the chroma boost, the exposure gain or a slab dimension into a tint channel, and
+      // `updateQuads` swallows every throw from this call, so nothing else here would notice; the
+      // browser tests' chroma, luma and interior-bending differentials are the other half of this guard.
+      // Every override is deliberately a value no neighbour and no tint channel holds (1.0, 1.0, 1.0,
+      // 0.12), so any adjacent transposition changes this array.
       engine.updateQuads([
         {
           id: "panel",
@@ -146,7 +147,7 @@ describe("packages/core engine negotiation", () => {
           width: 100,
           height: 50,
           cornerRadius: 12,
-          optical: { saturation: 1.42, brightness: 1.17 },
+          optical: { saturation: 1.42, brightness: 1.17, thickness: 14.5, curvature: 0.23 },
         },
       ]);
       expect(quadArgs).toHaveLength(1);
@@ -165,6 +166,8 @@ describe("packages/core engine negotiation", () => {
         DEFAULT_OPTICAL_PARAMS.roughness,
         1.42,
         1.17,
+        14.5,
+        0.23,
         ...DEFAULT_OPTICAL_PARAMS.tintColor,
       ]);
 
