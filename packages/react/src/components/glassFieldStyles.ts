@@ -1,15 +1,12 @@
 import type { CSSProperties } from "react";
+import { glassHandoverStyle, type GlassHandoverStyle } from "../surface";
 
 /**
  * Shared style helpers for the form controls, so five components do not each re-derive the same
  * numbers. These are plain functions over `CSSProperties`, not components.
  */
 
-export interface GlassFieldSurface {
-  background: string;
-  backdropFilter: string;
-  WebkitBackdropFilter: string;
-}
+export interface GlassFieldSurface extends GlassHandoverStyle {}
 
 export interface GlassFocusRing {
   border: string;
@@ -23,13 +20,18 @@ export const FIELD_CSS_BACKDROP = "blur(18px) saturate(180%)";
  * The `background` / `backdropFilter` / `WebkitBackdropFilter` triple, mirroring `GlassCard`: the
  * literal while the CSS fallback is in charge, `none` plus a dialled-down tint once the GPU path
  * composites — keeping both on would stack two different glass models in one scene.
+ *
+ * Delegates to `glassHandoverStyle` so the overlay ramps over `GLASS_HANDOVER_MS` instead of
+ * stepping the instant `isRenderReady` flips, the same fix Plan 00653 gave the panel components.
  */
-export function fieldSurface(isRenderReady: boolean): GlassFieldSurface {
-  return {
-    background: isRenderReady ? "rgba(255, 255, 255, 0.04)" : "rgba(255, 255, 255, 0.14)",
-    backdropFilter: isRenderReady ? "none" : FIELD_CSS_BACKDROP,
-    WebkitBackdropFilter: isRenderReady ? "none" : FIELD_CSS_BACKDROP,
-  };
+export function fieldSurface(isRenderReady: boolean, transition?: string): GlassFieldSurface {
+  return glassHandoverStyle({
+    isRenderReady,
+    fallbackBackground: "rgba(255, 255, 255, 0.14)",
+    readyBackground: "rgba(255, 255, 255, 0.04)",
+    cssBackdrop: FIELD_CSS_BACKDROP,
+    transition,
+  });
 }
 
 const RING_BORDER_WIDTH = "1px";
